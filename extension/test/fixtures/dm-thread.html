@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<!--
+  Fixture: representative Instagram DM thread DOM snapshot.
+  Used by scraper.test.ts. This is a simplified mock — the real IG DOM
+  is more complex. This fixture encodes current scraper assumptions.
+  It is NOT a guarantee the real IG DOM matches.
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Direct — Instagram DM Thread Fixture</title>
+</head>
+<body>
+  <main role="main">
+    <div class="DirectThread__scroll" style="overflow-y: auto; height: 600px;">
+      <ul>
+
+        <!-- ─── Message bubble 1: Reel ─────────────────────────────────────── -->
+        <li role="listitem" data-testid="message-bubble">
+          <div class="MessageBubble">
+            <!-- Author -->
+            <div class="SharedPost__header">
+              <span class="Username">@buildingpublic</span>
+            </div>
+            <!-- Shared post preview card -->
+            <div class="SharedPost__card">
+              <a href="/reel/ABC123/" class="SharedPost__link">
+                <img
+                  src="https://example.com/reel-thumb.jpg"
+                  alt="May be an image of text that says 'BUILD IN PUBLIC'"
+                />
+              </a>
+              <div class="SharedPost__caption" dir="auto">
+                Lessons from 6 months of building in public. The hardest part is showing up daily.
+              </div>
+            </div>
+            <!-- Timestamp -->
+            <time datetime="2026-05-01T01:00:00.000Z">May 1</time>
+          </div>
+        </li>
+
+        <!-- ─── Message bubble 2: Carousel ────────────────────────────────── -->
+        <li role="listitem" data-testid="message-bubble">
+          <div class="MessageBubble">
+            <div class="SharedPost__header">
+              <span class="Username">@designthinking</span>
+            </div>
+            <div class="SharedPost__card">
+              <a href="/p/CAR456/" class="SharedPost__link">
+                <!-- Multiple images signal carousel -->
+                <ul class="CarouselSlides">
+                  <li>
+                    <img
+                      src="https://example.com/slide1.jpg"
+                      alt="May be an image of text that says 'SLIDE 1: PROBLEM SPACE'"
+                    />
+                  </li>
+                  <li>
+                    <img
+                      src="https://example.com/slide2.jpg"
+                      alt="May be an image of text that says 'SLIDE 2: SOLUTION'"
+                    />
+                  </li>
+                  <li>
+                    <img
+                      src="https://example.com/slide3.jpg"
+                      alt="Photo of a whiteboard with sticky notes"
+                    />
+                  </li>
+                </ul>
+                <span class="CarouselIndicator">1 of 3</span>
+              </a>
+              <div class="SharedPost__caption" dir="auto">
+                Design thinking in 3 slides. Save this for your next workshop.
+              </div>
+            </div>
+            <time datetime="2026-05-02T14:30:00.000Z">May 2</time>
+          </div>
+        </li>
+
+        <!-- ─── Message bubble 3: Single image ────────────────────────────── -->
+        <li role="listitem" data-testid="message-bubble">
+          <div class="MessageBubble">
+            <div class="SharedPost__header">
+              <span class="Username">@photojournal</span>
+            </div>
+            <div class="SharedPost__card">
+              <a href="/p/IMG789/" class="SharedPost__link">
+                <img
+                  src="https://example.com/photo.jpg"
+                  alt="Photo of a mountain landscape at sunset"
+                />
+              </a>
+              <div class="SharedPost__caption" dir="auto">
+                Golden hour in the Dolomites. No filter.
+              </div>
+            </div>
+            <time datetime="2026-05-03T18:45:00.000Z">May 3</time>
+          </div>
+        </li>
+
+        <!-- ─── Message bubble 4: Duplicate reel (same URL as bubble 1) ───── -->
+        <li role="listitem" data-testid="message-bubble">
+          <div class="MessageBubble">
+            <div class="SharedPost__header">
+              <span class="Username">@anotheruser</span>
+            </div>
+            <div class="SharedPost__card">
+              <!-- Same reel URL as bubble 1 — should be deduped -->
+              <a href="/reel/ABC123/" class="SharedPost__link">
+                <img
+                  src="https://example.com/reel-thumb.jpg"
+                  alt="May be an image of text that says 'BUILD IN PUBLIC'"
+                />
+              </a>
+              <div class="SharedPost__caption" dir="auto">
+                Shared this again — same reel!
+              </div>
+            </div>
+            <time datetime="2026-05-04T09:00:00.000Z">May 4</time>
+          </div>
+        </li>
+
+      </ul>
+    </div>
+  </main>
+</body>
+</html>
