@@ -1,0 +1,50 @@
+{
+  "participants": [
+    {
+      "name": "samy.lay"
+    }
+  ],
+  "messages": [
+    {
+      "sender_name": "samy.lay",
+      "timestamp_ms": 1714525200000,
+      "share": {
+        "link": "https://www.instagram.com/reel/ABC123def/",
+        "share_text": "Amazing reel ð",
+        "original_content_owner": "chef_handle"
+      }
+    },
+    {
+      "sender_name": "samy.lay",
+      "timestamp_ms": 1714438800000,
+      "share": {
+        "link": "https://www.instagram.com/p/XYZ789ghi/",
+        "share_text": "Incroyable! TrÃ¨s beau.",
+        "original_content_owner": "foodie_creator"
+      }
+    },
+    {
+      "sender_name": "samy.lay",
+      "timestamp_ms": 1714352400000,
+      "share": {
+        "link": "https://www.instagram.com/reel/ABC123def/",
+        "share_text": "duplicate - should be ignored",
+        "original_content_owner": "chef_handle"
+      }
+    },
+    {
+      "sender_name": "samy.lay",
+      "timestamp_ms": 1714266000000,
+      "content": "Hey check this out! (plain text message - must be ignored)"
+    },
+    {
+      "sender_name": "samy.lay",
+      "timestamp_ms": 1714179600000,
+      "share": {
+        "link": "https://www.instagram.com/reels/MOJIBAKE11/",
+        "share_text": "CafÃ© vibes so good!",
+        "original_content_owner": "barista_art"
+      }
+    }
+  ]
+}

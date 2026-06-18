@@ -1,0 +1,17 @@
+{
+  "name": "reels-reader-importer",
+  "version": "1.0.0",
+  "description": "Parse Instagram Data Download Messages export and extract shared post URLs",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "tsc"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.3",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.9"
+  }
+}

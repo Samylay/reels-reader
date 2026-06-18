@@ -150,3 +150,42 @@ model id), so swapping Sonnet ↔ Opus ↔ local is a config change, not a rewri
 `ANTHROPIC_API_KEY` in `.env`; vision and Whisper require a running local Ollama + Whisper.
 
 **Supersedes:** the architecture spec's original "claude-opus-4-8 for everything" assumption.
+
+---
+
+## Input via official Data Download, not live scraping
+
+**Decision (2026-06-18):** Step 1 gets the post list by parsing Instagram's official
+"Download Your Information" **Messages** export (JSON), not by scraping the live DM thread.
+The Chrome extension was built first, then this approach was abandoned after direct testing.
+
+**Why the extension failed — evidence, not guesses (tested on the real site):**
+1. **No URLs in the DOM.** A full-page scan of the open DM thread found 8 links total, all
+   site navigation (`/`, `/reels/`, `/direct/inbox/`, `/explore/`, `/<self>/`). Shared posts
+   render as clickable `<div>`s, not anchors — the shortcode is nowhere in the DOM.
+2. **REST thread API blocked.** `GET /api/v1/direct_v2/threads/<id>/` returned HTTP 500 even
+   with `X-IG-App-ID`, `X-IG-WWW-Claim`, `X-ASBD-ID`, credentials — the web client no longer
+   uses a replayable REST endpoint for this.
+3. **Messages stream over MQTT WebSocket.** The page CSP allows `wss://edge-chat.instagram.com`
+   and the Network tab showed no message-loading HTTP request at all. DM data arrives over a
+   persistent realtime channel an extension can't cleanly re-issue.
+4. **React/Relay holds nothing usable.** A fiber walk over rendered messages found zero media
+   objects with a `code`; IG uses a Relay normalized store keyed by internal IDs.
+
+Re-implementing Instagram's MQTT protocol in an extension would be fragile, high-maintenance,
+and is exactly the automation-against-Instagram pattern the "No headless browser" decision set
+out to avoid for ban-safety.
+
+**Why the export is better for a backlog drain:** complete (every shared post, not just what's
+rendered), ToS-compliant with zero ban risk (no automation hits Instagram), stable (a
+documented file format, not an obfuscated DOM), and simple (a JSON parser, not a scraper).
+
+**Tradeoff accepted:** not real-time — the user requests the export and Instagram delivers a
+zip within minutes-to-a-day (4-day download window). Fine for a one-time ~100-post drain.
+
+**Rejected:** (a) the live DOM/extension scraper — proven non-viable above; (b) replaying the
+REST/GraphQL API — 500s, data is on WebSocket; (c) MQTT/Relay-store extraction — too fragile
+and the ban-risk we explicitly avoid.
+
+**Status of the extension:** kept in `extension/` (build/popup/background/mock-backend remain
+useful), but shelved. `specs/phase-1-plan.md` is superseded by `specs/phase-1-importer-plan.md`.

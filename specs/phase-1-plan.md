@@ -1,4 +1,10 @@
-# Phase 1 Plan — Extension (URL scraper)
+# Phase 1 Plan — Extension (URL scraper)  ⚠️ SUPERSEDED (2026-06-18)
+
+> **This plan is superseded.** The extension was built per this spec, then proven non-viable
+> against the live Instagram site (no URLs in DOM, REST API 500s, DMs over MQTT WebSocket,
+> nothing in React/Relay). See `decisions.md` → "Input via official Data Download" and the
+> live spec `specs/phase-1-importer-plan.md`. The extension code in `extension/` is kept but
+> shelved. This file is retained for historical context only.
 
 Authored as the build spec for the implementation agent. Read `CLAUDE.md`,
 `specs/architecture.md`, and `specs/decisions.md` first — this plan refines Phase 1 of the

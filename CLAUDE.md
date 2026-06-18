@@ -13,8 +13,10 @@ originals stay in Instagram DMs until the user manually clears them.
 
 ## Architecture in three sentences
 
-1. A **Chrome extension** does one narrow job: read the DM thread and extract the list of
-   post URLs. It does NOT summarize, screenshot, or unsend.
+1. An **importer** does one narrow job: parse Instagram's official "Download Your Information"
+   Messages export (JSON) and extract the list of shared post URLs. (It replaced a DM-scraping
+   Chrome extension that proved non-viable — see decisions.md "Input via official Data
+   Download"; extension code is shelved in `extension/`.) It does NOT summarize or unsend.
 2. A **Node backend** takes the URL list and processes each post — reels via yt-dlp +
    Whisper + frames, carousels/images via public fetch + alt-text-or-vision — then calls
    Claude for a summary.
@@ -31,8 +33,9 @@ originals stay in Instagram DMs until the user manually clears them.
 
 ## Current state
 
-Design locked. No code written yet. Start at Phase 1 (extension URL scraper) unless the
-user directs otherwise.
+Phase 1 pivoted (2026-06-18): live DM scraping (the `extension/`) was built but proven
+non-viable; Phase 1 is now an **importer** for Instagram's official data export. Build spec:
+`specs/phase-1-importer-plan.md`. Next: build/validate the importer, then Phase 2 (backend).
 
 ## Where to look
 

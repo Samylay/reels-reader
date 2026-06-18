@@ -12,22 +12,34 @@ the pipeline.
 
 ## The three steps
 
-### Step 1 — Extension (dumb URL scraper)
+### Step 1 — Importer (parse Instagram's official Data Download)
 
-A Chrome extension, Manifest v3, content script on `instagram.com/direct/*`.
+> **Changed 2026-06-18.** The original plan — a Chrome extension scraping the DM thread DOM —
+> was built and then proven non-viable against the live site. See decisions.md → "Input via
+> official Data Download, not live scraping" for the full evidence. The extension code remains
+> in `extension/` (shelved, reusable later); Step 1 is now an importer.
 
-Single responsibility: read the DM thread DOM and extract the list of post URLs.
-- Reel links: `<a href="/reels/{id}/">` or `/p/{id}/`
-- Carousel/image posts: `<a href="/p/{id}/">`
-- Also capture, cheaply from the DOM, what's already there: author handle, caption,
-  timestamp, and per-image `alt` text (Instagram auto-generates OCR-ish alt text).
+A small Node + TypeScript CLI that reads the **Messages** export from Instagram's official
+"Download Your Information" (JSON format) and extracts the list of shared posts.
 
-Output: a list of post objects `{ url, type, author, caption, timestamp, altTexts[] }`.
+Single responsibility: walk `inbox/<thread>/message_*.json`, find messages that share a post
+(a `share` object with a permalink), and emit the post list.
+- Reel links: `https://www.instagram.com/reel/{id}/`
+- Post links: `https://www.instagram.com/p/{id}/`
+- Also capture what the export provides: author (`share.original_content_owner` when present),
+  caption/`share_text`, and the message `timestamp_ms`.
 
-It deliberately does NOT summarize, screenshot, download, or unsend. Keeping it tiny is
-what keeps it reliable when Instagram's DOM shifts.
+Output: the same list of post objects the backend already expects
+`{ url, type, author, caption, timestamp, altTexts[] }`, POSTed to the backend `/ingest`.
 
-How the list reaches the backend: see `open-questions.md` (auto-POST vs manual paste).
+It deliberately does NOT summarize, fetch media, or hit Instagram at all — it only parses a
+local file the user already downloaded. Zero ban risk, no auth, no DOM.
+
+> **Consequence:** the export contains no per-image `alt` text, so `altTexts[]` is empty from
+> this source and the backend's "alt-text-first" cheap path can't key off it. The backend can
+> re-derive accessibility/alt text from the public post page when it fetches each URL — the
+> heuristic moves server-side rather than disappearing. Caption/author/timestamp still come
+> from the export.
 
 ### Step 2 — Backend (does the work)
 

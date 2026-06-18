@@ -1,0 +1,14 @@
+{
+  "participants": [{ "name": "samy.lay" }, { "name": "friend_user" }],
+  "messages": [
+    {
+      "sender_name": "friend_user",
+      "timestamp_ms": 1714093200000,
+      "share": {
+        "link": "https://www.instagram.com/reel/OTHER999xyz/",
+        "share_text": "Check this out",
+        "original_content_owner": "other_creator"
+      }
+    }
+  ]
+}
