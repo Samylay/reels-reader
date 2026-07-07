@@ -271,6 +271,60 @@ def worker():
         process(jobs.get())
 
 
+# --- telegram voice notes ----------------------------------------------------
+# A voice/audio message to the bot = a talk-session entry in the vault voice
+# inbox (same format LifeOS's /api/voice/save writes), so the objectives
+# classifier sweeps and routes it exactly like a brief-page recording. This is
+# the phone half of "one list of things to talk about, one voice input".
+
+VOICE_INBOX_DIR = os.environ.get(
+    "VOICE_INBOX_DIR", f"{HOME}/vault/obsidian/01-Inbox/voice"
+)
+
+
+def tg_download(file_id: str) -> bytes:
+    info = tg("getFile", file_id=file_id)
+    fp = info.get("result", {}).get("file_path")
+    if not fp:
+        raise RuntimeError("getFile returned no file_path")
+    url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{fp}"
+    with urllib.request.urlopen(url, timeout=120) as resp:
+        data = resp.read()
+    if len(data) > MAX_AUDIO_BYTES:
+        raise RuntimeError(f"voice note too large ({len(data)} bytes)")
+    return data
+
+
+def voice_inbox_append(transcript: str) -> str:
+    os.makedirs(VOICE_INBOX_DIR, exist_ok=True)
+    date = time.strftime("%Y-%m-%d")
+    path = os.path.join(VOICE_INBOX_DIR, f"{date}.md")
+    header = "" if os.path.exists(path) else f"# Voice inbox — {date}\n"
+    entry = (
+        f"{header}\n## {time.strftime('%H:%M')} · talk-session\n"
+        f"> (voice note via Telegram — today's talking points are in the morning brief)\n\n"
+        f"{transcript}\n"
+    )
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(entry)
+    return path
+
+
+def process_voice(file_id: str):
+    try:
+        transcript = transcribe(tg_download(file_id))
+        if not transcript.strip():
+            reply("⚠️ voice note came back empty from whisper")
+            return
+        voice_inbox_append(transcript)
+        preview = transcript[:400] + ("…" if len(transcript) > 400 else "")
+        reply(f"🎙 in the inbox (routes on the next objectives sweep):\n{preview}")
+        log.info("voice note captured (%d chars)", len(transcript))
+    except Exception as e:
+        log.warning("voice capture failed: %s", e)
+        reply(f"⚠️ couldn't process the voice note: {e}")
+
+
 # --- telegram long-poll -----------------------------------------------------
 
 def poll_telegram():
@@ -287,6 +341,12 @@ def poll_telegram():
                 offset = max(offset, u["update_id"])
                 msg = u.get("message") or {}
                 if str(msg.get("chat", {}).get("id")) != str(CHAT_ID):
+                    continue
+                media = msg.get("voice") or msg.get("audio") or msg.get("video_note")
+                if media and media.get("file_id"):
+                    threading.Thread(
+                        target=process_voice, args=(media["file_id"],), daemon=True
+                    ).start()
                     continue
                 text = msg.get("text") or msg.get("caption") or ""
                 urls = IG_URL_RE.findall(text) or ANY_URL_RE.findall(text)
