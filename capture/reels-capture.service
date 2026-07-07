@@ -1,0 +1,28 @@
+# reels-capture — share-an-Instagram-post → summarized into the vault + Telegram reply.
+# Install: sudo cp reels-capture.service /etc/systemd/system/
+#          sudo systemctl daemon-reload && sudo systemctl enable --now reels-capture
+[Unit]
+StartLimitIntervalSec=600
+StartLimitBurst=8
+Description=Reels capture service (Telegram long-poll + HTTP ingest)
+After=network-online.target
+Wants=network-online.target
+OnFailure=notify-telegram@%n.service
+
+[Service]
+Type=simple
+User=quorky
+Group=quorky
+WorkingDirectory=/home/quorky/apps/reels-reader/capture
+# Telegram bot token + chat id (600, quorky-owned)
+EnvironmentFile=/home/quorky/.config/reels-capture.env
+# Shared Claude Code CLI auth (CLAUDE_CODE_OAUTH_TOKEN)
+EnvironmentFile=/home/quorky/.config/claude-cli.env
+Environment=CAPTURE_HOST=127.0.0.1
+Environment=CAPTURE_PORT=8093
+ExecStart=/usr/bin/python3 /home/quorky/apps/reels-reader/capture/server.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

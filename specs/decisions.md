@@ -189,3 +189,38 @@ and the ban-risk we explicitly avoid.
 
 **Status of the extension:** kept in `extension/` (build/popup/background/mock-backend remain
 useful), but shelved. `specs/phase-1-plan.md` is superseded by `specs/phase-1-importer-plan.md`.
+
+---
+
+## Capture-first pivot — the backlog is dropped (2026-07-07)
+
+**Decision:** The product is no longer "drain a 100-post backlog into a reviewable
+inbox". It is: **the moment Samy finds an interesting post, he shares it and gets a
+summary back**. Implemented as `capture/server.py` — a resident service with two
+entry points (Telegram share to the existing homelab bot via long-polling getUpdates,
+and `POST /ingest` on 127.0.0.1:8093) and one pipeline: yt-dlp → local Whisper →
+`claude -p` → append to the Obsidian vault (`01-Inbox/reels/YYYY-MM-DD.md`) →
+Telegram reply with the summary.
+
+**Why:** Samy explicitly redirected the project ("drop the idea of the posts I
+already have in my convo, target what I do when a new post is interesting to me").
+With no batch backlog there is nothing to batch-review, so the phase-2 Node backend
+and phase-3 React inbox lose their reason to exist. The Telegram reply is the review
+checkpoint (a bad summary is visible immediately, next to the original link), and
+the vault is the store — which also plugs into Hermes enrichment for free.
+
+**What this supersedes:**
+- *"Inbox, not Obsidian-write-then-unsend"* — the unsend danger is gone (nothing is
+  ever unsent) and per-post immediate review replaces batch review, so writing to
+  the vault is now safe and correct. The web-app inbox is dropped, not deferred.
+- The **importer** as the entry point. It stays in the repo as a one-shot tool if
+  the old backlog is ever exported, but nothing depends on it.
+
+**Unchanged constraints:** public posts only, no headless browser, no Instagram
+auth, non-destructive. yt-dlp anonymous fetch is attempted first; the public
+`/embed/captioned/` page is the caption fallback; if Instagram walls both, the
+reply says so honestly — no login, no cookies, ever.
+
+**Rejected:** n8n Telegram *Trigger* as the inbound path — Telegram triggers need a
+public webhook URL and n8n is deliberately tailnet-only. Long-polling the same bot
+is free because n8n only ever *sends* (verified: getWebhookInfo url is empty).

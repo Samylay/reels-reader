@@ -2,76 +2,63 @@
 
 > Executor contract: each night an unattended Sonnet agent (`claude -p`, cwd = this repo) picks the FIRST unchecked task, does ONLY that task, verifies it per the task's Verify note, commits with an `autoloop:` prefix (one logical change per commit, never leave the tree dirty), then ticks the checkbox adding the date and a one-line result, and appends details to ## Log. If verification fails: revert, leave unchecked, add a `BLOCKED:` note.
 
+> **Rewritten 2026-07-07 after the capture-first pivot** (see `specs/decisions.md`).
+> The previous T01–T09 (backend scaffold → React inbox → containerized deploy) targeted
+> the backlog-draining design and are superseded — the capture service replaced them.
+
 ## Context for the executor
 
-Pipeline that drains ~100 Instagram posts (saved in a self-DM thread) into a reviewable
-inbox: **importer** (DONE — parses Instagram's official Data Download export, 31 tests
-green) → **backend** (NOT BUILT — summarizes each post) → **inbox web app** (NOT BUILT —
-review cards). Read `CLAUDE.md` first, then `specs/architecture.md`. **Do not re-open
-decisions settled in `specs/decisions.md`.**
+Live service: `capture/server.py` runs as system unit `reels-capture.service`
+(Telegram long-poll + `POST /ingest` on 127.0.0.1:8093 → yt-dlp → whisper at
+`172.17.0.1:8091` → `claude -p` sonnet → vault `01-Inbox/reels/` → Telegram reply).
+Read `CLAUDE.md` first. **Do not re-open decisions settled in `specs/decisions.md`.**
 
-- Stack: Node 22, TypeScript strict + NodeNext, vitest — mirror `importer/` conventions
-  (`npm run typecheck`, `npm test`, `npm run build`) in every new package.
-- Backend lives in a new `backend/` directory. Data store: SQLite (better-sqlite3), file
-  `backend/data/posts.db` (gitignore the db file, keep the dir).
-- Post shape from the importer: `{ url, type, author, caption, timestamp, altTexts[] }`
-  (`altTexts` is always empty from the export — the caption path is the main path).
-- LLM: homelab standard is the Claude CLI. Call `/home/quorky/.local/bin/claude -p` (model
-  `sonnet`) behind a `GEN_PROVIDER` env seam (`claude-cli` | `ollama`), same pattern as
-  `~/apps/flux/lib/ai/client.ts`. Auth env: `/home/quorky/.config/claude-cli.env`.
-- Local transcription service exists at `~/services/whisper` (systemd user unit).
-- **NEVER touch:** `extension/` (shelved, keep as-is), `specs/decisions.md`, anything that
-  contacts Instagram with auth or a headless browser (hard ban-risk constraint), nothing
-  destructive to Instagram content.
-- Host gap: `yt-dlp` and `ffmpeg` are NOT installed — T05 must gate on installing them
-  (user-local: `pipx install yt-dlp` or `python3 -m pip install --user yt-dlp`; ffmpeg via
-  static build into `~/.local/bin` — no sudo assumptions).
+- Python 3 stdlib only in `capture/` (house style: see `~/services/whisper/server.py`).
+  Verify any change with `python3 -m py_compile capture/server.py` plus the task's
+  functional check. You may NOT restart `reels-capture.service` (system unit, needs
+  sudo) — code changes take effect on Samy's next restart; say so in the Log entry.
+- Secrets: `~/.config/reels-capture.env` (bot token) and `~/.config/claude-cli.env` —
+  never read into logs, never commit.
+- `importer/` is a retired one-shot tool (31 tests green) — leave it working, don't
+  extend it. `extension/` stays shelved as-is.
+- **NEVER touch:** anything contacting Instagram with auth, cookies, or a headless
+  browser; `capture/data/capture.db` contents; nothing destructive to Instagram content.
 
 ## Tasks
 
-- [ ] **T01 — Backend scaffold** (S) — Create `backend/` (package.json, strict NodeNext
-  tsconfig, vitest) with an Express app exposing `GET /health` → `{ok:true}`, listening on
-  `127.0.0.1:8787` (the port the importer already POSTs to). Include `npm run dev|build|
-  typecheck|test`. Verify: `cd backend && npm run typecheck && npm test` pass; start server,
-  `curl -s 127.0.0.1:8787/health` returns `{"ok":true}`, then stop it.
-- [ ] **T02 — SQLite store + `POST /ingest`** (M) — `posts` table matching the per-post data
-  model in `specs/architecture.md` (plus `status` default `pending`, timestamps). `/ingest`
-  accepts the importer's batch payload (see `importer/src/payload.ts` for the exact shape),
-  upserts deduped by `url`, returns counts `{received, inserted, duplicates}`. Verify: unit
-  tests incl. re-ingest dedupe; curl a 2-post sample twice → second call reports 2 duplicates.
-- [ ] **T03 — Summarization provider seam** (M) — `backend/src/ai/` with `GEN_PROVIDER`
-  toggle: `claude-cli` (spawn `/home/quorky/.local/bin/claude -p`, model `sonnet`, timeout,
-  JSON-safe output) and an `ollama` fallback stub. Copy the proven pattern from
-  `~/apps/flux/lib/ai/client.ts`. Verify: unit tests with the spawn mocked; one live smoke
-  call producing a non-empty summary for a hardcoded caption.
-- [ ] **T04 — Caption summarize queue** (M) — Sequential worker (1–2s spacing per
-  architecture.md Risks): picks `pending` posts, builds a summary from caption + author +
-  type (altTexts are empty from the export), stores `summary`, sets `status=processed`;
-  errors → `status` stays `pending` with an `error` column note, max 3 attempts. Trigger via
-  `POST /process` and on a `--drain` CLI flag. Verify: tests with mocked provider; live: ingest
-  2 sample posts, run drain, both rows `processed` with non-empty summaries.
-- [ ] **T05 — Reel path: yt-dlp + Whisper transcript** (M) — Install `yt-dlp`+`ffmpeg`
-  user-locally (see Context; if that fails, BLOCK — do not sudo). For `type=reel`: download
-  audio, transcribe via the local whisper service (`~/services/whisper/server.py` — read it
-  for the endpoint contract), feed transcript+caption into the T03 provider. Verify: tests
-  with fetch/transcribe mocked; live: process one hardcoded public reel URL end-to-end (if
-  Instagram blocks the fetch, BLOCK with the yt-dlp error rather than retrying).
-- [ ] **T06 — Inbox app scaffold** (M) — `inbox/` React+Vite app served by the backend (or
-  proxied in dev): `GET /posts?status=` API + a card list (summary, caption, author, type,
-  source link, status badge). Match repo TS strictness. Verify: `npm run build` clean; with
-  backend running and 2 processed rows, `curl /posts` returns them and the built app renders
-  (curl the served index.html 200).
-- [ ] **T07 — Review actions** (M) — `PATCH /posts/:id` (edit summary, set status
-  `reviewed|archived`, add tags TEXT[] json column) + card buttons wired. Non-destructive
-  only — no delete of Instagram content, DB delete allowed. Verify: API tests; live: PATCH a
-  row and see it reflected in `GET /posts`.
-- [ ] **T08 — Containerize + deploy on quorky** (M) — Dockerfile + compose (backend+inbox one
-  service, volume for `data/`), bind `127.0.0.1`, document Tailscale Serve exposure in
-  README (do NOT change tailnet config yourself). Verify: `docker compose up -d --build`,
-  `/health` 200 and `/posts` 200 from host, then leave it running.
-- [ ] **T09 — Run guide refresh** (S) — `GETTING-STARTED.md` still documents the shelved
-  extension as "what works today". Rewrite it around the importer→backend→inbox flow (keep a
-  short "extension (shelved)" appendix). Verify: doc references only commands that exist;
-  every command in it copy-paste runs (or is explicitly marked as needing the real export).
+- [ ] **T01 — Persist the job queue** (S) — `jobs` is an in-memory `queue.Queue`; URLs
+  accepted but not yet processed are lost on restart/crash. Persist pending jobs in the
+  existing SQLite ledger (`status='queued'` rows re-enqueued on startup) so an accepted
+  `202` is a durable promise. Verify: `python3 -m py_compile capture/server.py`; unit
+  test or scripted check that a row with `status='queued'`/`'processing'` is re-enqueued
+  by the startup path (import `server` with a temp `DB_PATH` and assert).
+- [ ] **T02 — Image/carousel path via embed alt-text** (M) — image posts have no audio;
+  today they only get the caption. In the `/embed/captioned/` fallback (and as an
+  enrichment even when yt-dlp succeeds but `duration` is absent), also extract `alt`
+  attributes from the embed HTML and pass them to the summarizer as `alt_texts`.
+  Per the alt-text-first decision: no vision API call in this task. Verify: py_compile
+  plus a unit-style test of the HTML-parsing function on a saved fixture page.
+- [ ] **T03 — Capture status in ledger CLI** (S) — add `capture/status.py`: prints last
+  20 ledger rows (time, status, title, url) and counts by status, so Samy can audit
+  captures without sqlite3 syntax. Verify: run it against the real db, exits 0, output
+  shows the demo capture row.
+- [ ] **T04 — NEEDS-SAMY: phone share-sheet shortcut for /ingest** (S) — decide the
+  phone path for non-Telegram capture: bind CAPTURE_HOST to the tailscale IP or add a
+  Tailscale Serve route, then create the iOS/Android shortcut (Share → POST
+  `{"url":...}` to quorky:8093/ingest). Doc lives in `capture/README.md`. Samy must do
+  the phone-side setup and the bind decision.
+- [ ] **T05 — NEEDS-SAMY: retire or run the importer once** (S) — if the old ~100-post
+  DM backlog still matters, Samy downloads the Instagram Data Download export and runs
+  `importer/` once, feeding the URL list into `POST /ingest` (throttled, e.g. 1/min);
+  otherwise mark the importer retired in its README. Needs his export either way.
 
 ## Log
+
+- **2026-07-07 (session, not autoloop):** capture pivot built and deployed —
+  `capture/server.py` + `reels-capture.service` (enabled, active), yt-dlp+ffmpeg
+  installed via apt, bot token extracted from n8n credentials into
+  `~/.config/reels-capture.env` (webhook slot verified empty → long-poll safe).
+  End-to-end verified 13:30 UTC: POST /ingest → yt-dlp → whisper transcript →
+  sonnet summary → vault `01-Inbox/reels/2026-07-07.md` (Hermes enriched it) →
+  Telegram reply; 17 s. Fixed en route: normalize() stripped load-bearing query
+  strings on non-IG URLs; claude errors now carry stderr.

@@ -6,46 +6,52 @@
 
 ## What this is
 
-A three-step pipeline that drains a backlog of ~100 Instagram posts (saved to a personal
-DM thread sent to self) into a reviewable inbox. Each post gets summarized by Claude; the
-user validates summaries in a web app rather than trusting them blindly. Non-destructive —
-originals stay in Instagram DMs until the user manually clears them.
+A capture pipeline for interesting Instagram posts, **at the moment they're found**: Samy
+shares a post (Telegram share sheet → the homelab bot, or `POST /ingest`), and gets the
+summary back as a Telegram reply seconds later. The summary + transcript are archived in
+the Obsidian vault (`01-Inbox/reels/YYYY-MM-DD.md`), where Hermes enriches them like any
+other inbox note. The Telegram reply is the review checkpoint; the vault is the store.
 
-## Architecture in three sentences
+(Previous incarnation — draining a ~100-post DM backlog via Instagram's Data Download
+export into a React inbox — was dropped 2026-07-07; see decisions.md "Capture-first
+pivot". The `importer/` remains as a one-shot tool; `extension/` is shelved.)
 
-1. An **importer** does one narrow job: parse Instagram's official "Download Your Information"
-   Messages export (JSON) and extract the list of shared post URLs. (It replaced a DM-scraping
-   Chrome extension that proved non-viable — see decisions.md "Input via official Data
-   Download"; extension code is shelved in `extension/`.) It does NOT summarize or unsend.
-2. A **Node backend** takes the URL list and processes each post — reels via yt-dlp +
-   Whisper + frames, carousels/images via public fetch + alt-text-or-vision — then calls
-   Claude for a summary.
-3. A **React inbox web app** presents each processed post as a card the user reviews,
-   edits, tags, and archives.
+## Architecture in two sentences
+
+1. **`capture/server.py`** (systemd `reels-capture.service`, Python stdlib) long-polls the
+   existing Telegram bot's getUpdates and serves `POST /ingest` on `127.0.0.1:8093`; both
+   feed one worker queue.
+2. Per URL: SQLite dedupe → `yt-dlp -J` (public, anonymous) with `/embed/captioned/`
+   caption fallback → if video, bestaudio → local Whisper (`172.17.0.1:8091`) → `claude -p`
+   (sonnet) summary → vault append → Telegram reply (or an honest failure reply).
 
 ## Hard constraints (these shaped the whole design)
 
-- **All saved posts are public.** This is the load-bearing assumption. It means yt-dlp can
-  fetch everything (reels, carousels, images) directly from the backend with no auth.
-- **No headless browser.** Driving a headless browser against Instagram is the highest
-  ban-risk pattern and is unnecessary given everything is public. See decisions log.
-- **Non-destructive.** Nothing the pipeline does touches or deletes Instagram content.
+- **Public posts only, no Instagram auth, no cookies.** yt-dlp fetches anonymously; if
+  Instagram walls it, the pipeline reports failure rather than escalating.
+- **No headless browser.** Highest ban-risk pattern; see decisions log.
+- **Non-destructive.** Nothing touches or deletes Instagram content.
+- The bot token is shared with n8n (which only *sends*); the webhook slot must stay empty
+  or long-polling breaks. Config in `~/.config/reels-capture.env` (600).
 
 ## Current state
 
-Phase 1 pivoted (2026-06-18): live DM scraping (the `extension/`) was built but proven
-non-viable; Phase 1 is now an **importer** for Instagram's official data export. Build spec:
-`specs/phase-1-importer-plan.md`. Next: build/validate the importer, then Phase 2 (backend).
+Deployed and verified end-to-end 2026-07-07 (fetch → transcribe → summarize → vault →
+Telegram reply, 17 s). Known gaps are queued in `ROADMAP.md` (nightly autoloop executes
+one task per night): in-memory job queue loses in-flight URLs on restart; image/carousel
+posts only get caption text (no alt-text/vision path yet); phone share-sheet shortcut
+for `/ingest` not yet documented.
 
 ## Where to look
 
-- `specs/architecture.md` — full spec: steps, content routing, components, phases
 - `specs/decisions.md` — why things are the way they are (read before proposing changes)
-- `specs/open-questions.md` — the two decisions still open
+- `capture/server.py` — the whole service; `capture/reels-capture.service` — the unit
+- `ROADMAP.md` — executor-contract task queue for the nightly autoloop
+- `specs/architecture.md` + `specs/phase-1-importer-plan.md` — the retired backlog design
+  (historical context only)
 
 ## Stack context
 
-User runs a homelab machine **quorky** (Beelink SER5 Max, Ubuntu Server, Docker/Portainer,
-Tailscale, Ollama/Qwen2.5 7B). The inbox web app is intended to run as a container on
-quorky, reachable over Tailscale, sitting alongside an existing "LifeOS v2" dashboard.
-User stack: React, Node, TypeScript, Docker, Python, Anthropic SDK.
+Homelab machine **quorky** (Ubuntu Server, Docker, Tailscale). Whisper runs as a host
+service on the docker bridge IP; `claude -p` auth comes from
+`~/.config/claude-cli.env` (see the homelab CLAUDE.md constitution for global rules).
