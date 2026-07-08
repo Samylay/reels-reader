@@ -26,12 +26,15 @@ Read `CLAUDE.md` first. **Do not re-open decisions settled in `specs/decisions.m
 
 ## Tasks
 
-- [ ] **T01 — Persist the job queue** (S) — `jobs` is an in-memory `queue.Queue`; URLs
+- [x] **T01 — Persist the job queue** (S) — `jobs` is an in-memory `queue.Queue`; URLs
   accepted but not yet processed are lost on restart/crash. Persist pending jobs in the
   existing SQLite ledger (`status='queued'` rows re-enqueued on startup) so an accepted
   `202` is a durable promise. Verify: `python3 -m py_compile capture/server.py`; unit
   test or scripted check that a row with `status='queued'`/`'processing'` is re-enqueued
-  by the startup path (import `server` with a temp `DB_PATH` and assert).
+  by the startup path (import `server` with a temp `DB_PATH` and assert). (2026-07-08:
+  added `enqueue()`/`reload_pending_jobs()`; py_compile clean, scripted check with a
+  temp `DB_PATH` confirms queued/processing rows re-enqueue and done rows don't — takes
+  effect on next service restart, not done unattended.)
 - [ ] **T02 — Image/carousel path via embed alt-text** (M) — image posts have no audio;
   today they only get the caption. In the `/embed/captioned/` fallback (and as an
   enrichment even when yt-dlp succeeds but `duration` is absent), also extract `alt`
@@ -62,3 +65,11 @@ Read `CLAUDE.md` first. **Do not re-open decisions settled in `specs/decisions.m
   sonnet summary → vault `01-Inbox/reels/2026-07-07.md` (Hermes enriched it) →
   Telegram reply; 17 s. Fixed en route: normalize() stripped load-bearing query
   strings on non-IG URLs; claude errors now carry stderr.
+
+- **2026-07-08 (autoloop, T01):** added `enqueue(url)` (writes `status='queued'` to the
+  ledger before `jobs.put`, skipping urls already `done`) and `reload_pending_jobs()`
+  (re-enqueues `queued`/`processing` rows on startup), wired into `poll_telegram`,
+  `do_POST /ingest`, and `__main__`. Verified with `python3 -m py_compile` and a scripted
+  check against a temp `DB_PATH` (2 pending rows re-enqueued, 1 done row skipped; fresh
+  `enqueue()` call persists `queued` before reaching the queue). Not restarted — system
+  unit, needs Samy's next restart to pick this up.
