@@ -1,0 +1,19 @@
+<!--
+Trimmed stand-in for Instagram's public /embed/captioned/ page markup, kept
+for capture/test_alt_text.py. Real pages carry more chrome around this; only
+the bits the parser reads (Caption div, og:title, img alt attributes) matter.
+-->
+<html>
+<head>
+<meta property="og:title" content="Fallback title from og:title" />
+</head>
+<body>
+<div class="EmbedContent">
+  <img alt="Photo by Jane Doe on July 08, 2026. May be an image of text that says 'Ship small, ship often.'" src="a.jpg" />
+  <img alt="Photo by Jane Doe on July 08, 2026. May be an image of text that says 'Ship small, ship often.'" src="b.jpg" />
+  <img alt="" src="c.jpg" />
+  <img alt="No text detected, just a photo of a laptop on a desk" src="d.jpg" />
+  <div class="Caption"><span>Some caption &amp; text with <b>markup</b></span></div>
+</div>
+</body>
+</html>

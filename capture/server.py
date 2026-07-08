@@ -164,17 +164,37 @@ def ytdlp_audio(url) -> bytes:
         return data
 
 
-def embed_caption(url):
-    """Fallback: Instagram's public embed page usually carries the caption."""
+def fetch_embed_page(url):
+    """Fetch Instagram's public /embed/captioned/ page (no auth, no headless browser)."""
     embed = normalize(url) + "/embed/captioned/"
     req = urllib.request.Request(embed, headers={"User-Agent": UA})
-    body = urllib.request.urlopen(req, timeout=20).read().decode("utf-8", "replace")
+    return urllib.request.urlopen(req, timeout=20).read().decode("utf-8", "replace")
+
+
+def embed_caption_from_html(body: str) -> str:
     m = re.search(r'class="Caption"[^>]*>(.*?)</div>', body, re.S)
     if not m:
         m = re.search(r'property="og:title" content="([^"]*)"', body)
         return html.unescape(m.group(1)) if m else ""
     text = re.sub(r"<[^>]+>", " ", m.group(1))
     return html.unescape(re.sub(r"\s+", " ", text)).strip()
+
+
+def embed_caption(url):
+    """Fallback: Instagram's public embed page usually carries the caption."""
+    return embed_caption_from_html(fetch_embed_page(url))
+
+
+def extract_alt_texts(body: str) -> list:
+    """Image alt text is IG's own accessibility OCR — cheap/rich signal (see
+    decisions.md "Alt-text-first"). Pull it straight from the embed HTML, dedup,
+    drop blanks."""
+    seen = []
+    for raw in re.findall(r'alt="([^"]*)"', body):
+        text = html.unescape(raw).strip()
+        if text and text not in seen:
+            seen.append(text)
+    return seen
 
 
 def transcribe(audio: bytes) -> str:
@@ -185,7 +205,7 @@ def transcribe(audio: bytes) -> str:
         return json.loads(resp.read()).get("transcript", "")
 
 
-def summarize(meta: dict, transcript: str) -> str:
+def summarize(meta: dict, transcript: str, alt_texts: list = None) -> str:
     material = json.dumps(
         {
             "author": meta.get("uploader") or meta.get("channel") or "",
@@ -193,6 +213,7 @@ def summarize(meta: dict, transcript: str) -> str:
             "caption": (meta.get("description") or "")[:3000],
             "duration_s": meta.get("duration"),
             "transcript": transcript[:6000],
+            "alt_texts": alt_texts or [],
         },
         ensure_ascii=False,
     )
@@ -259,23 +280,30 @@ def process(url):
         reply(f"♻️ already captured: {url}")
         return
     ledger_set(url, "processing")
-    meta, transcript, fetch_note = {}, "", ""
+    meta, transcript, fetch_note, alt_texts = {}, "", "", []
     try:
         try:
             meta = ytdlp_json(url)
         except Exception as e:
             fetch_note = f"yt-dlp: {e}"
             log.info("yt-dlp failed for %s (%s), trying embed fallback", url, e)
-            caption = embed_caption(url)
+            body = fetch_embed_page(url)
+            caption = embed_caption_from_html(body)
             if not caption:
                 raise RuntimeError(f"unfetchable ({fetch_note}; embed empty)")
             meta = {"title": "", "description": caption}
+            alt_texts = extract_alt_texts(body)
         if meta.get("duration"):
             try:
                 transcript = transcribe(ytdlp_audio(url))
             except Exception as e:
                 log.warning("audio/transcribe failed for %s: %s", url, e)
-        summary = summarize(meta, transcript)
+        elif not alt_texts:
+            try:
+                alt_texts = extract_alt_texts(fetch_embed_page(url))
+            except Exception as e:
+                log.info("alt-text enrichment failed for %s: %s", url, e)
+        summary = summarize(meta, transcript, alt_texts)
         path = vault_append(url, meta, summary, transcript)
         ledger_set(url, "done", title=summary.splitlines()[0], note=fetch_note)
         log.info("captured %s -> %s", url, path)
