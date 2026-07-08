@@ -113,6 +113,26 @@ def already_done(url) -> bool:
     return bool(row and row[0] == "done")
 
 
+def enqueue(url):
+    """Record a durable 'queued' promise before handing off to the in-memory queue."""
+    nurl = normalize(url)
+    if not already_done(nurl):
+        ledger_set(nurl, "queued")
+    jobs.put(url)
+
+
+def reload_pending_jobs():
+    """Startup recovery: re-enqueue rows left 'queued'/'processing' by a prior crash/restart."""
+    con = db()
+    rows = con.execute(
+        "SELECT url FROM posts WHERE status IN ('queued','processing')"
+    ).fetchall()
+    con.close()
+    for (url,) in rows:
+        log.info("re-enqueuing pending job from ledger: %s", url)
+        jobs.put(url)
+
+
 # --- fetch ------------------------------------------------------------------
 
 def ytdlp_json(url):
@@ -353,7 +373,7 @@ def poll_telegram():
                 for found in urls:
                     log.info("telegram ingest: %s", found)
                     reply("👀 on it…")
-                    jobs.put(found)
+                    enqueue(found)
             if updates:
                 con = db()
                 con.execute(
@@ -394,7 +414,7 @@ class Handler(BaseHTTPRequestHandler):
             if not ANY_URL_RE.match(url):
                 self._json(400, {"error": "body must be {\"url\": \"https://...\"}"})
                 return
-            jobs.put(url)
+            enqueue(url)
             self._json(202, {"queued": normalize(url)})
         except Exception as e:
             self._json(400, {"error": str(e)})
@@ -404,6 +424,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    reload_pending_jobs()
     threading.Thread(target=worker, daemon=True).start()
     if BOT_TOKEN and CHAT_ID:
         threading.Thread(target=poll_telegram, daemon=True).start()
