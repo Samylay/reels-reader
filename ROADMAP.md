@@ -35,12 +35,16 @@ Read `CLAUDE.md` first. **Do not re-open decisions settled in `specs/decisions.m
   added `enqueue()`/`reload_pending_jobs()`; py_compile clean, scripted check with a
   temp `DB_PATH` confirms queued/processing rows re-enqueue and done rows don't — takes
   effect on next service restart, not done unattended.)
-- [ ] **T02 — Image/carousel path via embed alt-text** (M) — image posts have no audio;
+- [x] **T02 — Image/carousel path via embed alt-text** (M) — image posts have no audio;
   today they only get the caption. In the `/embed/captioned/` fallback (and as an
   enrichment even when yt-dlp succeeds but `duration` is absent), also extract `alt`
   attributes from the embed HTML and pass them to the summarizer as `alt_texts`.
   Per the alt-text-first decision: no vision API call in this task. Verify: py_compile
   plus a unit-style test of the HTML-parsing function on a saved fixture page.
+  (2026-07-08: added `extract_alt_texts()`/`embed_caption_from_html()`, wired
+  `alt_texts` into `summarize()` for the embed-fallback path and as an enrichment
+  when `duration` is absent; py_compile clean, `capture/test_alt_text.py` against
+  `capture/fixtures/embed_captioned_sample.html` passes — no vision call added.)
 - [ ] **T03 — Capture status in ledger CLI** (S) — add `capture/status.py`: prints last
   20 ledger rows (time, status, title, url) and counts by status, so Samy can audit
   captures without sqlite3 syntax. Verify: run it against the real db, exits 0, output
@@ -73,3 +77,15 @@ Read `CLAUDE.md` first. **Do not re-open decisions settled in `specs/decisions.m
   check against a temp `DB_PATH` (2 pending rows re-enqueued, 1 done row skipped; fresh
   `enqueue()` call persists `queued` before reaching the queue). Not restarted — system
   unit, needs Samy's next restart to pick this up.
+
+- **2026-07-08 (autoloop, T02):** split `embed_caption()` into `fetch_embed_page()` +
+  `embed_caption_from_html()` so the caption and the new `extract_alt_texts()` parse the
+  same fetched HTML without a second request. `extract_alt_texts()` regex-extracts `alt="…"`
+  attributes, unescapes, dedups, drops blanks. Wired into `process()`: the embed-fallback
+  path passes alt texts from the same fetch; the yt-dlp-success-but-no-`duration` path does
+  a second embed fetch just for alt text. `summarize()` now includes `alt_texts` in the
+  material JSON handed to `claude -p`. No vision API call (per alt-text-first decision).
+  Verified: `python3 -m py_compile capture/server.py` clean; new
+  `capture/test_alt_text.py` (unit-style, no network) against
+  `capture/fixtures/embed_captioned_sample.html` passes — asserts alt-text dedup/blank-drop
+  and caption parsing. Not restarted — system unit, needs Samy's next restart.
