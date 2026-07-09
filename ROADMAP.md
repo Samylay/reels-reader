@@ -45,10 +45,12 @@ Read `CLAUDE.md` first. **Do not re-open decisions settled in `specs/decisions.m
   `alt_texts` into `summarize()` for the embed-fallback path and as an enrichment
   when `duration` is absent; py_compile clean, `capture/test_alt_text.py` against
   `capture/fixtures/embed_captioned_sample.html` passes — no vision call added.)
-- [ ] **T03 — Capture status in ledger CLI** (S) — add `capture/status.py`: prints last
+- [x] **T03 — Capture status in ledger CLI** (S) — add `capture/status.py`: prints last
   20 ledger rows (time, status, title, url) and counts by status, so Samy can audit
   captures without sqlite3 syntax. Verify: run it against the real db, exits 0, output
-  shows the demo capture row.
+  shows the demo capture row. (2026-07-09: added `capture/status.py`; py_compile clean,
+  ran against real `capture/data/capture.db`, exit 0, output lists the 2026-07-07 demo
+  row and `done: 1` count.)
 - [ ] **T04 — NEEDS-SAMY: phone share-sheet shortcut for /ingest** (S) — decide the
   phone path for non-Telegram capture: bind CAPTURE_HOST to the tailscale IP or add a
   Tailscale Serve route, then create the iOS/Android shortcut (Share → POST
@@ -89,3 +91,8 @@ Read `CLAUDE.md` first. **Do not re-open decisions settled in `specs/decisions.m
   `capture/test_alt_text.py` (unit-style, no network) against
   `capture/fixtures/embed_captioned_sample.html` passes — asserts alt-text dedup/blank-drop
   and caption parsing. Not restarted — system unit, needs Samy's next restart.
+
+- **2026-07-09 (autoloop, T03):** added `capture/status.py` (stdlib, read-only) — prints
+  the last 20 `posts` rows (added_at, status, title, url) and counts grouped by status.
+  Verified: `python3 -m py_compile capture/status.py` clean; ran it against the real
+  `capture/data/capture.db`, exit 0, output lists the 2026-07-07 demo row and `done: 1`.
