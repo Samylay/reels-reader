@@ -274,35 +274,59 @@ def reply(text):
 
 # --- pipeline ---------------------------------------------------------------
 
+def fetch_content(url: str) -> dict:
+    """Side-effect-free content fetch for one IG URL — no ledger, no vault, no
+    Telegram, safe to import from other services (the triage study step reuses
+    it). yt-dlp metadata with /embed/captioned/ caption fallback, alt-texts,
+    and a Whisper transcript when the post is a video yt-dlp can reach
+    anonymously. Best-effort: returns whatever partial text exists.
+
+    Returns {"meta": dict, "transcript": str, "alt_texts": list,
+    "fetch_note": str}; meta is {} only when every fetch path came up empty.
+    """
+    url = normalize(url)
+    meta, transcript, alt_texts, fetch_note = {}, "", [], ""
+    try:
+        meta = ytdlp_json(url)
+    except Exception as e:
+        fetch_note = f"yt-dlp: {e}"
+        log.info("yt-dlp failed for %s (%s), trying embed fallback", url, e)
+        try:
+            body = fetch_embed_page(url)
+            caption = embed_caption_from_html(body)
+            alt_texts = extract_alt_texts(body)
+            if caption:
+                meta = {"title": "", "description": caption}
+            else:
+                fetch_note += "; embed empty"
+        except Exception as e2:
+            fetch_note += f"; embed: {e2}"
+    if meta.get("duration"):
+        try:
+            transcript = transcribe(ytdlp_audio(url))
+        except Exception as e:
+            log.warning("audio/transcribe failed for %s: %s", url, e)
+    elif not alt_texts:
+        try:
+            alt_texts = extract_alt_texts(fetch_embed_page(url))
+        except Exception as e:
+            log.info("alt-text enrichment failed for %s: %s", url, e)
+    return {"meta": meta, "transcript": transcript,
+            "alt_texts": alt_texts, "fetch_note": fetch_note}
+
+
 def process(url):
     url = normalize(url)
     if already_done(url):
         reply(f"♻️ already captured: {url}")
         return
     ledger_set(url, "processing")
-    meta, transcript, fetch_note, alt_texts = {}, "", "", []
     try:
-        try:
-            meta = ytdlp_json(url)
-        except Exception as e:
-            fetch_note = f"yt-dlp: {e}"
-            log.info("yt-dlp failed for %s (%s), trying embed fallback", url, e)
-            body = fetch_embed_page(url)
-            caption = embed_caption_from_html(body)
-            if not caption:
-                raise RuntimeError(f"unfetchable ({fetch_note}; embed empty)")
-            meta = {"title": "", "description": caption}
-            alt_texts = extract_alt_texts(body)
-        if meta.get("duration"):
-            try:
-                transcript = transcribe(ytdlp_audio(url))
-            except Exception as e:
-                log.warning("audio/transcribe failed for %s: %s", url, e)
-        elif not alt_texts:
-            try:
-                alt_texts = extract_alt_texts(fetch_embed_page(url))
-            except Exception as e:
-                log.info("alt-text enrichment failed for %s: %s", url, e)
+        fetched = fetch_content(url)
+        meta, transcript = fetched["meta"], fetched["transcript"]
+        alt_texts, fetch_note = fetched["alt_texts"], fetched["fetch_note"]
+        if not meta:
+            raise RuntimeError(f"unfetchable ({fetch_note})")
         summary = summarize(meta, transcript, alt_texts)
         path = vault_append(url, meta, summary, transcript)
         ledger_set(url, "done", title=summary.splitlines()[0], note=fetch_note)
