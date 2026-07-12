@@ -51,7 +51,7 @@ Read `CLAUDE.md` first. **Do not re-open decisions settled in `specs/decisions.m
   shows the demo capture row. (2026-07-09: added `capture/status.py`; py_compile clean,
   ran against real `capture/data/capture.db`, exit 0, output lists the 2026-07-07 demo
   row and `done: 1` count.)
-- [ ] **T06 — Retry failed captures + persist partial results on pipeline failure** (M) —
+- [x] **T06 — Retry failed captures + persist partial results on pipeline failure** (M) —
   from the Hermes loss audit F4 (`~/scratch/hermes-loss-audit-2026-07-13.md`): on any
   pipeline error the ledger row is set `failed` with only the error string
   (`capture/server.py:335-338`) — an already-computed Whisper transcript is discarded if
@@ -81,6 +81,26 @@ Read `CLAUDE.md` first. **Do not re-open decisions settled in `specs/decisions.m
   otherwise mark the importer retired in its README. Needs his export either way.
 
 ## Log
+
+- **2026-07-13 (session, not autoloop, T06):** loss-audit F4 fix implemented. Schema
+  migration adds `attempts`/`stage`/`partial` to `posts` (auto-applied on next `db()`
+  call; existing rows untouched, verified on the live ledger — backup first at
+  `~/backups/reels-capture/capture-2026-07-13-pre-T06.db`). `process()` now: persists
+  fetched content (meta/transcript/alt-texts) on the row via `ledger_fail()` before
+  marking failed; retries resume from the persisted partial (fetch/whisper skipped —
+  proven in the dry run by making `fetch_content` raise on the resume pass); Telegram
+  warns on the first failure only, replies "recovered on retry" on a later success;
+  at 3 exhausted attempts, salvaged caption/transcript is delivered to the vault as an
+  explicit `⚠️ partial capture` block and the row goes terminal `status='partial'`
+  (nothing salvageable → honest terminal `failed`). Retry feed: `reload_pending_jobs`
+  now also re-enqueues budgeted `failed` rows at startup + a daily `retry_sweep`
+  thread. New env knobs: `CAPTURE_DB`, `CAPTURE_MAX_ATTEMPTS` (3), 
+  `CAPTURE_RETRY_SWEEP_SECONDS`. Verify: `py_compile` clean; 4-step dry run (temp db +
+  temp vault + empty bot token) passed — failed row holds transcript+stage / resume
+  without re-fetch lands in vault / exhaustion delivers partial with exactly 2 replies
+  total / retry selector honors the bound; `test_alt_text.py` still OK. NOT restarted —
+  system unit, per the contract above; **the fix is inert until Samy's next
+  `sudo systemctl restart reels-capture.service`**.
 
 - **2026-07-07 (session, not autoloop):** capture pivot built and deployed —
   `capture/server.py` + `reels-capture.service` (enabled, active), yt-dlp+ffmpeg
