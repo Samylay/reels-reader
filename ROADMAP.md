@@ -51,6 +51,25 @@ Read `CLAUDE.md` first. **Do not re-open decisions settled in `specs/decisions.m
   shows the demo capture row. (2026-07-09: added `capture/status.py`; py_compile clean,
   ran against real `capture/data/capture.db`, exit 0, output lists the 2026-07-07 demo
   row and `done: 1` count.)
+- [ ] **T06 — Retry failed captures + persist partial results on pipeline failure** (M) —
+  from the Hermes loss audit F4 (`~/scratch/hermes-loss-audit-2026-07-13.md`): on any
+  pipeline error the ledger row is set `failed` with only the error string
+  (`capture/server.py:335-338`) — an already-computed Whisper transcript is discarded if
+  `summarize()` then fails — and `failed` rows are never retried
+  (`reload_pending_jobs` selects only queued/processing, `server.py:124-133`), so the
+  share never reaches the vault unless Samy manually re-shares. Fix: (a) persist partial
+  results (caption/transcript, and which stage failed) on the ledger row before marking
+  `failed`; (b) on retry, resume from the persisted stage instead of re-fetching (a
+  transcript in hand skips yt-dlp + Whisper); (c) bounded automatic retry — re-enqueue
+  `failed` rows at startup and once daily, max 3 attempts with the attempt count on the
+  row, honoring the existing hard constraints (public/anonymous only — a cookie-walled
+  post that keeps failing exhausts its retries and stays honestly failed). Keep the
+  Telegram failure reply on the first failure only, and send a success reply if a retry
+  later lands it. Verify: `python3 -m py_compile capture/server.py`; unit-style dry run —
+  inject a summarize failure after a stubbed transcript, confirm the row holds the
+  transcript + stage and that a subsequent retry resumes from summarize and appends to
+  the vault (use a temp vault path via env override; do not send real Telegram messages
+  while testing — stub/empty the token).
 - [ ] **T04 — NEEDS-SAMY: phone share-sheet shortcut for /ingest** (S) — decide the
   phone path for non-Telegram capture: bind CAPTURE_HOST to the tailscale IP or add a
   Tailscale Serve route, then create the iOS/Android shortcut (Share → POST
