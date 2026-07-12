@@ -56,8 +56,13 @@ WHISPER_URL = os.environ.get("WHISPER_URL", "http://172.17.0.1:8091/transcribe")
 VAULT_DIR = os.environ.get("VAULT_REELS_DIR", f"{HOME}/vault/obsidian/01-Inbox/reels")
 CLAUDE_BIN = os.environ.get("CLAUDE_BIN", f"{HOME}/.local/bin/claude")
 YTDLP_BIN = os.environ.get("YTDLP_BIN", "/usr/bin/yt-dlp")
-DB_PATH = os.path.join(BASE, "data", "capture.db")
+DB_PATH = os.environ.get("CAPTURE_DB", os.path.join(BASE, "data", "capture.db"))
 MAX_AUDIO_BYTES = 24 * 1024 * 1024
+# T06: bounded automatic retry of failed captures. A cookie-walled post that
+# keeps failing exhausts its attempts and stays honestly failed (or `partial`
+# if some text was salvaged).
+MAX_ATTEMPTS = int(os.environ.get("CAPTURE_MAX_ATTEMPTS", "3"))
+RETRY_SWEEP_SECONDS = int(os.environ.get("CAPTURE_RETRY_SWEEP_SECONDS", str(24 * 3600)))
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -83,6 +88,13 @@ def db():
              title TEXT, note TEXT)"""
     )
     con.execute("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)")
+    # T06 migration: attempt counter, failed stage, salvaged partial content.
+    cols = {r[1] for r in con.execute("PRAGMA table_info(posts)")}
+    if "attempts" not in cols:
+        con.execute("ALTER TABLE posts ADD COLUMN attempts INTEGER DEFAULT 0")
+        con.execute("ALTER TABLE posts ADD COLUMN stage TEXT DEFAULT ''")
+        con.execute("ALTER TABLE posts ADD COLUMN partial TEXT DEFAULT ''")
+        con.commit()
     return con
 
 
@@ -95,6 +107,8 @@ def normalize(url: str) -> str:
 
 
 def ledger_set(url, status, title="", note=""):
+    """Upsert status/title/note. Never clobbers attempts/stage/partial —
+    those move only through ledger_fail / ledger_clear_retry_state."""
     con = db()
     con.execute(
         "INSERT INTO posts(url, added_at, status, title, note) VALUES(?,?,?,?,?) "
@@ -104,6 +118,46 @@ def ledger_set(url, status, title="", note=""):
     )
     con.commit()
     con.close()
+
+
+def ledger_get(url) -> dict:
+    con = db()
+    con.row_factory = sqlite3.Row
+    row = con.execute("SELECT * FROM posts WHERE url=?", (url,)).fetchone()
+    con.close()
+    return dict(row) if row else {}
+
+
+def ledger_fail(url, stage: str, error: str, fetched: dict = None):
+    """Mark a failed attempt: bump the attempt counter, record which stage
+    broke, and persist whatever content was already computed so a retry (or
+    the terminal partial delivery) never redoes or loses it. Returns the new
+    attempt count."""
+    partial = ""
+    if fetched and (fetched.get("meta") or fetched.get("transcript")
+                    or fetched.get("alt_texts")):
+        partial = json.dumps(fetched, ensure_ascii=False)
+    con = db()
+    con.execute(
+        "UPDATE posts SET status='failed', note=?, stage=?, "
+        "attempts=attempts+1, partial=CASE WHEN ?='' THEN partial ELSE ? END "
+        "WHERE url=?",
+        (error, stage, partial, partial, url),
+    )
+    con.commit()
+    row = con.execute("SELECT attempts FROM posts WHERE url=?", (url,)).fetchone()
+    con.close()
+    return row[0] if row else 1
+
+
+def failed_retryable_urls() -> list:
+    con = db()
+    rows = con.execute(
+        "SELECT url FROM posts WHERE status='failed' AND attempts < ?",
+        (MAX_ATTEMPTS,),
+    ).fetchall()
+    con.close()
+    return [r[0] for r in rows]
 
 
 def already_done(url) -> bool:
@@ -122,7 +176,8 @@ def enqueue(url):
 
 
 def reload_pending_jobs():
-    """Startup recovery: re-enqueue rows left 'queued'/'processing' by a prior crash/restart."""
+    """Startup recovery: re-enqueue rows left 'queued'/'processing' by a prior
+    crash/restart, plus 'failed' rows that still have retry budget (T06)."""
     con = db()
     rows = con.execute(
         "SELECT url FROM posts WHERE status IN ('queued','processing')"
@@ -131,6 +186,21 @@ def reload_pending_jobs():
     for (url,) in rows:
         log.info("re-enqueuing pending job from ledger: %s", url)
         jobs.put(url)
+    for url in failed_retryable_urls():
+        log.info("re-enqueuing failed job for retry: %s", url)
+        jobs.put(url)
+
+
+def retry_sweep():
+    """Once-daily second chance for failed captures with budget left —
+    walled-then-unwalled posts get retried without Samy re-sharing."""
+    while True:
+        time.sleep(RETRY_SWEEP_SECONDS)
+        urls = failed_retryable_urls()
+        if urls:
+            log.info("retry sweep: re-enqueuing %d failed job(s)", len(urls))
+        for url in urls:
+            jobs.put(url)
 
 
 # --- fetch ------------------------------------------------------------------
@@ -315,27 +385,93 @@ def fetch_content(url: str) -> dict:
             "alt_texts": alt_texts, "fetch_note": fetch_note}
 
 
+def vault_append_partial(url, fetched, error):
+    """Terminal delivery of salvaged content when retries are exhausted:
+    better a caption/transcript marked partial in the vault than nothing."""
+    meta = fetched.get("meta") or {}
+    caption = (meta.get("description") or meta.get("title") or "").strip()
+    transcript = fetched.get("transcript") or ""
+    alt_texts = fetched.get("alt_texts") or []
+    body = "\n".join(
+        s for s in (
+            f"**Caption:** {caption}" if caption else "",
+            f"**Alt text:** {' · '.join(alt_texts)}" if alt_texts else "",
+        ) if s
+    )
+    summary = (
+        f"⚠️ partial capture (summarization failed after {MAX_ATTEMPTS} "
+        f"attempts: {error})\n{body}" if body else
+        f"⚠️ partial capture ({error})"
+    )
+    return vault_append(url, meta, summary, transcript)
+
+
 def process(url):
     url = normalize(url)
     if already_done(url):
         reply(f"♻️ already captured: {url}")
         return
-    ledger_set(url, "processing")
+    prior = ledger_get(url)
+    is_retry = prior.get("status") == "failed"
+    resumed = {}
+    if is_retry and prior.get("partial"):
+        try:
+            resumed = json.loads(prior["partial"])
+        except ValueError:
+            resumed = {}
+    ledger_set(url, "processing", title=prior.get("title") or "",
+               note=prior.get("note") or "")
+    stage, fetched = "fetch", None
     try:
-        fetched = fetch_content(url)
+        if resumed.get("meta"):
+            # Resume: content already fetched on a prior attempt — skip
+            # yt-dlp/Whisper entirely and go straight to the failed stage.
+            fetched = resumed
+            log.info("retrying %s from stage '%s' with persisted partial",
+                     url, prior.get("stage") or "summarize")
+        else:
+            fetched = fetch_content(url)
         meta, transcript = fetched["meta"], fetched["transcript"]
-        alt_texts, fetch_note = fetched["alt_texts"], fetched["fetch_note"]
+        alt_texts = fetched.get("alt_texts") or []
+        fetch_note = fetched.get("fetch_note") or ""
         if not meta:
             raise RuntimeError(f"unfetchable ({fetch_note})")
+        stage = "summarize"
         summary = summarize(meta, transcript, alt_texts)
+        stage = "vault"
         path = vault_append(url, meta, summary, transcript)
         ledger_set(url, "done", title=summary.splitlines()[0], note=fetch_note)
         log.info("captured %s -> %s", url, path)
-        reply(f"📥 {summary}\n\n{url}")
+        reply(f"📥{' (recovered on retry)' if is_retry else ''} {summary}\n\n{url}")
     except Exception as e:
-        ledger_set(url, "failed", note=str(e))
-        log.warning("capture failed for %s: %s", url, e)
-        reply(f"⚠️ couldn't capture {url}\n{e}")
+        attempts = ledger_fail(url, stage, str(e), fetched)
+        log.warning("capture failed for %s at %s (attempt %d/%d): %s",
+                    url, stage, attempts, MAX_ATTEMPTS, e)
+        if attempts >= MAX_ATTEMPTS:
+            row = ledger_get(url)
+            salvaged = {}
+            if row.get("partial"):
+                try:
+                    salvaged = json.loads(row["partial"])
+                except ValueError:
+                    salvaged = {}
+            if salvaged.get("meta") or salvaged.get("transcript") \
+                    or salvaged.get("alt_texts"):
+                path = vault_append_partial(url, salvaged, e)
+                ledger_set(url, "partial",
+                           title=(salvaged.get("meta") or {}).get("title") or "",
+                           note=f"partial after {attempts} attempts: {e}")
+                log.info("delivered partial for %s -> %s", url, path)
+                reply(f"⚠️ gave up on {url} after {attempts} attempts, but "
+                      f"salvaged the caption/transcript into the vault.\n{e}")
+            else:
+                reply(f"⚠️ gave up on {url} after {attempts} attempts "
+                      f"(nothing salvageable).\n{e}")
+        elif attempts == 1:
+            # First failure only — retries are silent unless they succeed
+            # or exhaust the budget.
+            reply(f"⚠️ couldn't capture {url} (will retry, "
+                  f"{MAX_ATTEMPTS - attempts} attempts left)\n{e}")
 
 
 def worker():
@@ -478,6 +614,7 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     reload_pending_jobs()
     threading.Thread(target=worker, daemon=True).start()
+    threading.Thread(target=retry_sweep, daemon=True).start()
     if BOT_TOKEN and CHAT_ID:
         threading.Thread(target=poll_telegram, daemon=True).start()
     else:
