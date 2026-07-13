@@ -1,5 +1,10 @@
 # reels-reader importer
 
+> **RETIRED 2026-07-13 (Samy's call).** The capture-first pipeline (share → vault dump
+> collection) is the whole product now; the old ~100-post DM backlog will not be imported.
+> This tool is kept for reference only — not run, not maintained. To un-retire, delete this
+> banner and follow the steps below.
+
 Parses Instagram's official "Download Your Information" **Messages** export (JSON) and
 extracts shared posts into the shape the backend expects.
 
