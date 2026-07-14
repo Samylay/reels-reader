@@ -71,6 +71,7 @@ Read `CLAUDE.md` first. **Do not re-open decisions settled in `specs/decisions.m
   the vault (use a temp vault path via env override; do not send real Telegram messages
   while testing — stub/empty the token).
 - [ ] **T04 — NEEDS-SAMY: phone share-sheet shortcut for /ingest** (S) — decide the
+  - SAMY 2026-07-14: approved — use Tailscale Serve route, not tailscale-IP rebind
   phone path for non-Telegram capture: bind CAPTURE_HOST to the tailscale IP or add a
   Tailscale Serve route, then create the iOS/Android shortcut (Share → POST
   `{"url":...}` to quorky:8093/ingest). Doc lives in `capture/README.md`. Samy must do
