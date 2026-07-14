@@ -78,6 +78,7 @@ Read `CLAUDE.md` first. **Do not re-open decisions settled in `specs/decisions.m
   the phone-side setup and the bind decision.
   **SAMY 2026-07-13 (park):** the Telegram share-sheet capture is enough; the alt POST-to-:8093 phone path is optional and not wanted now.
 - [x] **T05 — NEEDS-SAMY: retire or run the importer once** (S) — if the old ~100-post
+  - SAMY 2026-07-14: deferred — quick yes/no only Samy can make on old IG backlog
   DM backlog still matters, Samy downloads the Instagram Data Download export and runs
   `importer/` once, feeding the URL list into `POST /ingest` (throttled, e.g. 1/min);
   otherwise mark the importer retired in its README. Needs his export either way.
