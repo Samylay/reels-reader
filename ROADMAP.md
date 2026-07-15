@@ -70,9 +70,9 @@ Read `CLAUDE.md` first. **Do not re-open decisions settled in `specs/decisions.m
   transcript + stage and that a subsequent retry resumes from summarize and appends to
   the vault (use a temp vault path via env override; do not send real Telegram messages
   while testing — stub/empty the token).
-- [ ] **T04 — NEEDS-SAMY: phone share-sheet shortcut for /ingest** (S) — decide the
+- [x] **T04 — phone share-sheet shortcut for /ingest — CLOSED won't-do 2026-07-15** (S) — **the 2026-07-13 park stands; closed in an attended audit with Samy.** This was a *second, redundant* capture path (phone share sheet → POST `{"url":...}` to `:8093/ingest`) alongside the Telegram one, which works and which Samy uses. He parked it 2026-07-13 ("the Telegram share-sheet capture is enough … not wanted now"). The `SAMY 2026-07-14: approved — use Tailscale Serve route, not tailscale-IP rebind` note below is **not a reversal**: the approval deck re-surfaced the already-parked task and he answered its narrow *technical* sub-question (which bind method), not the scope question. Confirmed with him 2026-07-15. **If revived: use a Tailscale Serve route, never a `CAPTURE_HOST` rebind** — that answer is good and is the reason this note is kept. Note the shape of the trap: an approval card that re-asks a parked question turns a "no" into an "approved" in the log. Original text:
   - SAMY 2026-07-14: approved — use Tailscale Serve route, not tailscale-IP rebind
-  phone path for non-Telegram capture: bind CAPTURE_HOST to the tailscale IP or add a
+  decide the phone path for non-Telegram capture: bind CAPTURE_HOST to the tailscale IP or add a
   Tailscale Serve route, then create the iOS/Android shortcut (Share → POST
   `{"url":...}` to quorky:8093/ingest). Doc lives in `capture/README.md`. Samy must do
   the phone-side setup and the bind decision.
