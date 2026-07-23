@@ -56,6 +56,7 @@ WHISPER_URL = os.environ.get("WHISPER_URL", "http://172.17.0.1:8091/transcribe")
 VAULT_DIR = os.environ.get("VAULT_REELS_DIR", f"{HOME}/vault/obsidian/01-Inbox/reels")
 CLAUDE_BIN = os.environ.get("CLAUDE_BIN", f"{HOME}/.local/bin/claude")
 YTDLP_BIN = os.environ.get("YTDLP_BIN", "/usr/bin/yt-dlp")
+FFMPEG_BIN = os.environ.get("FFMPEG_BIN", "/usr/bin/ffmpeg")
 DB_PATH = os.environ.get("CAPTURE_DB", os.path.join(BASE, "data", "capture.db"))
 MAX_AUDIO_BYTES = 24 * 1024 * 1024
 # T06: bounded automatic retry of failed captures. A cookie-walled post that
@@ -135,7 +136,7 @@ def ledger_fail(url, stage: str, error: str, fetched: dict = None):
     attempt count."""
     partial = ""
     if fetched and (fetched.get("meta") or fetched.get("transcript")
-                    or fetched.get("alt_texts")):
+                    or fetched.get("alt_texts") or fetched.get("ocr_text")):
         partial = json.dumps(fetched, ensure_ascii=False)
     con = db()
     con.execute(
@@ -267,6 +268,79 @@ def extract_alt_texts(body: str) -> list:
     return seen
 
 
+def poster_url_from_embed(body: str) -> str:
+    """The embed page's EmbeddedMediaImage is the reel's cover frame — for a
+    cookie-walled video it's the one frame we can still reach anonymously."""
+    m = re.search(r'class="EmbeddedMediaImage"[^>]*?src="([^"]+)"', body)
+    return html.unescape(m.group(1)) if m else ""
+
+
+def sample_video_frames(url: str, td: str) -> list:
+    """Download the video (yt-dlp, anonymous) and sample up to 8 frames at
+    3 s intervals for OCR. Raises if the video is unreachable."""
+    out = os.path.join(td, "v.%(ext)s")
+    r = subprocess.run(
+        [YTDLP_BIN, "-f", "best[height<=720]/best", "--no-playlist",
+         "--no-warnings", "-o", out, url],
+        capture_output=True, text=True, timeout=300,
+    )
+    vids = [os.path.join(td, f) for f in os.listdir(td) if f.startswith("v.")]
+    if r.returncode != 0 or not vids:
+        raise RuntimeError("video download failed")
+    subprocess.run(
+        [FFMPEG_BIN, "-loglevel", "error", "-i", vids[0],
+         "-vf", "fps=1/3", "-frames:v", "8", os.path.join(td, "frame%02d.jpg")],
+        capture_output=True, timeout=120,
+    )
+    return sorted(
+        os.path.join(td, f) for f in os.listdir(td) if f.startswith("frame")
+    )
+
+
+def ocr_images(paths: list) -> str:
+    """Burned-in text via `claude -p` vision (the homelab's LLM backend — no
+    tesseract dep). Merged + deduped across frames by the model itself."""
+    prompt = (
+        "Read each of these image files (frames sampled in order from one "
+        "short social-media video):\n" + "\n".join(paths) + "\n\n"
+        "Transcribe ALL burned-in on-screen text (captions, overlays, titles) "
+        "merged across frames, deduplicated, in order of first appearance. "
+        "Output the transcribed text only, no commentary, no markdown. "
+        "If there is no on-screen text, output exactly: NOTEXT"
+    )
+    r = subprocess.run(
+        [CLAUDE_BIN, "-p", prompt, "--model", "sonnet", "--allowedTools", "Read"],
+        capture_output=True, text=True, timeout=240,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(f"ocr claude call failed: {(r.stderr or '')[-200:]}")
+    text = r.stdout.strip()
+    return "" if text == "NOTEXT" else text
+
+
+def ocr_screen_text(url: str) -> str:
+    """Frame-based OCR fallback for posts whose caption/transcript came up
+    empty but whose video carries burned-in text. Frames from yt-dlp when the
+    video is reachable; otherwise the embed page's cover frame alone."""
+    with tempfile.TemporaryDirectory() as td:
+        frames = []
+        try:
+            frames = sample_video_frames(url, td)
+        except Exception as e:
+            log.info("frame sampling failed for %s (%s), trying cover frame", url, e)
+        if not frames:
+            purl = poster_url_from_embed(fetch_embed_page(url))
+            if not purl:
+                return ""
+            path = os.path.join(td, "poster.jpg")
+            req = urllib.request.Request(purl, headers={"User-Agent": UA})
+            with urllib.request.urlopen(req, timeout=30) as resp, \
+                    open(path, "wb") as f:
+                f.write(resp.read())
+            frames = [path]
+        return ocr_images(frames)
+
+
 def transcribe(audio: bytes) -> str:
     req = urllib.request.Request(
         WHISPER_URL, data=audio, headers={"Content-Type": "application/octet-stream"}
@@ -275,7 +349,8 @@ def transcribe(audio: bytes) -> str:
         return json.loads(resp.read()).get("transcript", "")
 
 
-def summarize(meta: dict, transcript: str, alt_texts: list = None) -> str:
+def summarize(meta: dict, transcript: str, alt_texts: list = None,
+              ocr_text: str = "") -> str:
     material = json.dumps(
         {
             "author": meta.get("uploader") or meta.get("channel") or "",
@@ -284,6 +359,7 @@ def summarize(meta: dict, transcript: str, alt_texts: list = None) -> str:
             "duration_s": meta.get("duration"),
             "transcript": transcript[:6000],
             "alt_texts": alt_texts or [],
+            "on_screen_text_ocr": ocr_text[:3000],
         },
         ensure_ascii=False,
     )
@@ -381,8 +457,24 @@ def fetch_content(url: str) -> dict:
             alt_texts = extract_alt_texts(fetch_embed_page(url))
         except Exception as e:
             log.info("alt-text enrichment failed for %s: %s", url, e)
+    # Burned-in-text OCR: when everything text-shaped came up thin (a follow-me
+    # caption, a music-only video), the substance is usually baked into the
+    # frames. Fallback/supplement, never a replacement for a real transcript.
+    ocr_text = ""
+    caption = (meta.get("description") or meta.get("title") or "").strip()
+    substance = re.sub(r"#\w+", "", f"{caption} {transcript}").strip()
+    if len(substance) < 80:
+        try:
+            ocr_text = ocr_screen_text(url)
+        except Exception as e:
+            log.info("ocr failed for %s: %s", url, e)
+        if ocr_text:
+            fetch_note = (fetch_note + "; " if fetch_note else "") + "ocr salvaged on-screen text"
+            if not meta:
+                meta = {"title": "", "description": ""}
     return {"meta": meta, "transcript": transcript,
-            "alt_texts": alt_texts, "fetch_note": fetch_note}
+            "alt_texts": alt_texts, "ocr_text": ocr_text,
+            "fetch_note": fetch_note}
 
 
 def vault_append_partial(url, fetched, error):
@@ -392,10 +484,12 @@ def vault_append_partial(url, fetched, error):
     caption = (meta.get("description") or meta.get("title") or "").strip()
     transcript = fetched.get("transcript") or ""
     alt_texts = fetched.get("alt_texts") or []
+    ocr_text = fetched.get("ocr_text") or ""
     body = "\n".join(
         s for s in (
             f"**Caption:** {caption}" if caption else "",
             f"**Alt text:** {' · '.join(alt_texts)}" if alt_texts else "",
+            f"**On-screen text (OCR):** {ocr_text}" if ocr_text else "",
         ) if s
     )
     summary = (
@@ -437,7 +531,8 @@ def process(url):
         if not meta:
             raise RuntimeError(f"unfetchable ({fetch_note})")
         stage = "summarize"
-        summary = summarize(meta, transcript, alt_texts)
+        summary = summarize(meta, transcript, alt_texts,
+                            fetched.get("ocr_text") or "")
         stage = "vault"
         path = vault_append(url, meta, summary, transcript)
         ledger_set(url, "done", title=summary.splitlines()[0], note=fetch_note)
@@ -456,7 +551,7 @@ def process(url):
                 except ValueError:
                     salvaged = {}
             if salvaged.get("meta") or salvaged.get("transcript") \
-                    or salvaged.get("alt_texts"):
+                    or salvaged.get("alt_texts") or salvaged.get("ocr_text"):
                 path = vault_append_partial(url, salvaged, e)
                 ledger_set(url, "partial",
                            title=(salvaged.get("meta") or {}).get("title") or "",
