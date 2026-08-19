@@ -28,6 +28,10 @@ Config via environment (see reels-capture.service):
   CAPTURE_HOST (127.0.0.1) / CAPTURE_PORT (8093)
   WHISPER_URL (http://172.17.0.1:8091/transcribe)
   VAULT_REELS_DIR (~/vault/obsidian/01-Inbox/reels)
+  YTDLP_COOKIES_FILE (unset by default = fully anonymous, unchanged; see
+    specs/decisions.md "'No cookies, ever' loosened to opt-in" 2026-07-25 —
+    only set this to a cookies.txt Samy exported himself, never generated
+    or read by an agent)
 """
 
 import html
@@ -57,6 +61,17 @@ VAULT_DIR = os.environ.get("VAULT_REELS_DIR", f"{HOME}/vault/obsidian/01-Inbox/r
 CLAUDE_BIN = os.environ.get("CLAUDE_BIN", f"{HOME}/.local/bin/claude")
 YTDLP_BIN = os.environ.get("YTDLP_BIN", "/usr/bin/yt-dlp")
 FFMPEG_BIN = os.environ.get("FFMPEG_BIN", "/usr/bin/ffmpeg")
+# Opt-in only (decisions.md, "'No cookies, ever' loosened to opt-in",
+# 2026-07-25): unset by default, meaning fully anonymous fetch, unchanged.
+# Samy supplies this file himself (exported from his own logged-in session);
+# no agent generates, reads, or transmits its contents.
+YTDLP_COOKIES_FILE = os.environ.get("YTDLP_COOKIES_FILE", "")
+
+
+def _ytdlp_cookie_args() -> list:
+    if YTDLP_COOKIES_FILE and os.path.isfile(YTDLP_COOKIES_FILE):
+        return ["--cookies", YTDLP_COOKIES_FILE]
+    return []
 DB_PATH = os.environ.get("CAPTURE_DB", os.path.join(BASE, "data", "capture.db"))
 MAX_AUDIO_BYTES = 24 * 1024 * 1024
 # T06: bounded automatic retry of failed captures. A cookie-walled post that
@@ -73,6 +88,23 @@ IG_URL_RE = re.compile(
     r"https?://(?:www\.)?instagram\.com/(?:[\w.]+/)?(?:p|reel|reels|tv)/[\w-]+", re.I
 )
 ANY_URL_RE = re.compile(r"https?://\S+")
+
+# A listicle promises N named items ("5 vibecoding websites", "top 10 tools",
+# "3 things nobody tells you") but those items are almost always burned into
+# the video frames as on-screen text, never spoken or in the caption — the
+# caption is just the hook/CTA. Found 2026-07-25: the generic "caption+
+# transcript is too short" OCR trigger missed this entirely, because an ad's
+# caption (sponsor tag, hashtags, follow-me CTA) is easily >80 chars on its
+# own while still containing zero of the actual list items. When a caption
+# matches this, OCR always runs regardless of caption/transcript length —
+# saving a listicle IS asking for the items on it.
+LISTICLE_RE = re.compile(
+    r"\b(?:top\s*)?\d+\s+\w*\s*"
+    r"(ways?|tips?|tools?|websites?|apps?|hacks?|secrets?|rules?|habits?|"
+    r"mistakes?|signs?|reasons?|things?|steps?|books?|movies?|websites?|"
+    r"prompts?|questions?|lessons?|tricks?)\b",
+    re.I,
+)
 
 jobs: "queue.Queue[str]" = queue.Queue()
 
@@ -208,7 +240,7 @@ def retry_sweep():
 
 def ytdlp_json(url):
     r = subprocess.run(
-        [YTDLP_BIN, "-J", "--no-warnings", "--no-playlist", url],
+        [YTDLP_BIN, "-J", "--no-warnings", "--no-playlist", *_ytdlp_cookie_args(), url],
         capture_output=True, text=True, timeout=120,
     )
     if r.returncode != 0:
@@ -221,7 +253,8 @@ def ytdlp_audio(url) -> bytes:
         out = os.path.join(td, "a.%(ext)s")
         r = subprocess.run(
             [YTDLP_BIN, "-f", "bestaudio/best", "-x", "--audio-format", "opus",
-             "--audio-quality", "48K", "--no-playlist", "-o", out, url],
+             "--audio-quality", "48K", "--no-playlist", *_ytdlp_cookie_args(),
+             "-o", out, url],
             capture_output=True, text=True, timeout=300,
         )
         if r.returncode != 0:
@@ -275,21 +308,44 @@ def poster_url_from_embed(body: str) -> str:
     return html.unescape(m.group(1)) if m else ""
 
 
-def sample_video_frames(url: str, td: str) -> list:
-    """Download the video (yt-dlp, anonymous) and sample up to 8 frames at
-    3 s intervals for OCR. Raises if the video is unreachable."""
+MAX_OCR_FRAMES = 16
+
+
+def sample_video_frames(url: str, td: str, duration_s: float = 0) -> list:
+    """Download the video (yt-dlp, anonymous) and sample frames for OCR,
+    spread evenly across the WHOLE clip rather than a fixed 3s/8-frame window
+    (found 2026-07-25: a fixed 3s spacing only covers the first ~24s, so a
+    30-60s listicle's later items — usually exactly the payload a listicle
+    promises — were silently never sampled). Raises if the video is
+    unreachable."""
     out = os.path.join(td, "v.%(ext)s")
     r = subprocess.run(
         [YTDLP_BIN, "-f", "best[height<=720]/best", "--no-playlist",
-         "--no-warnings", "-o", out, url],
+         "--no-warnings", *_ytdlp_cookie_args(), "-o", out, url],
         capture_output=True, text=True, timeout=300,
     )
     vids = [os.path.join(td, f) for f in os.listdir(td) if f.startswith("v.")]
     if r.returncode != 0 or not vids:
         raise RuntimeError("video download failed")
+    if not duration_s:
+        probe = subprocess.run(
+            ["/usr/bin/ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", vids[0]],
+            capture_output=True, text=True, timeout=30,
+        )
+        try:
+            duration_s = float(probe.stdout.strip())
+        except ValueError:
+            duration_s = 24.0
+    # One frame per ~2.5s of runtime, capped both ends: never fewer than 8
+    # (short clips still get real coverage) nor more than MAX_OCR_FRAMES
+    # (bounds the vision call's cost/latency on long videos).
+    n_frames = max(8, min(MAX_OCR_FRAMES, round(duration_s / 2.5) or 8))
+    fps = n_frames / duration_s if duration_s > 0 else 1 / 3
     subprocess.run(
         [FFMPEG_BIN, "-loglevel", "error", "-i", vids[0],
-         "-vf", "fps=1/3", "-frames:v", "8", os.path.join(td, "frame%02d.jpg")],
+         "-vf", f"fps={fps}", "-frames:v", str(n_frames),
+         os.path.join(td, "frame%02d.jpg")],
         capture_output=True, timeout=120,
     )
     return sorted(
@@ -318,27 +374,36 @@ def ocr_images(paths: list) -> str:
     return "" if text == "NOTEXT" else text
 
 
-def ocr_screen_text(url: str) -> str:
-    """Frame-based OCR fallback for posts whose caption/transcript came up
-    empty but whose video carries burned-in text. Frames from yt-dlp when the
-    video is reachable; otherwise the embed page's cover frame alone."""
+def ocr_screen_text(url: str, duration_s: float = 0) -> tuple:
+    """Frame-based OCR for posts whose burned-in text likely carries the
+    actual payload (see LISTICLE_RE below), or whose caption/transcript came
+    up thin. Frames from yt-dlp when the video is reachable; otherwise the
+    embed page's cover frame alone — a hard wall this project deliberately
+    never works around with cookies/auth (decisions.md: "no login, no
+    cookies, ever"), so a walled video's later frames (often exactly a
+    listicle's payload) are genuinely unreachable, not a bug.
+
+    Returns (text, cover_frame_only): the second value tells the caller
+    whether this is full-video coverage or just the single cover frame, so
+    that fact can be surfaced to whatever judges the content downstream
+    instead of silently reading as "OCR wasn't attempted"."""
     with tempfile.TemporaryDirectory() as td:
         frames = []
         try:
-            frames = sample_video_frames(url, td)
+            frames = sample_video_frames(url, td, duration_s)
         except Exception as e:
             log.info("frame sampling failed for %s (%s), trying cover frame", url, e)
         if not frames:
             purl = poster_url_from_embed(fetch_embed_page(url))
             if not purl:
-                return ""
+                return "", False
             path = os.path.join(td, "poster.jpg")
             req = urllib.request.Request(purl, headers={"User-Agent": UA})
             with urllib.request.urlopen(req, timeout=30) as resp, \
                     open(path, "wb") as f:
                 f.write(resp.read())
-            frames = [path]
-        return ocr_images(frames)
+            return ocr_images([path]), True
+        return ocr_images(frames), False
 
 
 def transcribe(audio: bytes) -> str:
@@ -457,24 +522,39 @@ def fetch_content(url: str) -> dict:
             alt_texts = extract_alt_texts(fetch_embed_page(url))
         except Exception as e:
             log.info("alt-text enrichment failed for %s: %s", url, e)
-    # Burned-in-text OCR: when everything text-shaped came up thin (a follow-me
-    # caption, a music-only video), the substance is usually baked into the
-    # frames. Fallback/supplement, never a replacement for a real transcript.
-    ocr_text = ""
+    # Burned-in-text OCR. Two independent triggers:
+    #  1. everything text-shaped came up thin (a follow-me caption, a
+    #     music-only video) — the substance is usually baked into the frames.
+    #  2. the caption promises a listicle ("5 vibecoding websites") — those
+    #     items live in on-screen text almost every time, and an ad/promo
+    #     caption is often long (sponsor tag, hashtags, CTA) while still
+    #     containing NONE of the actual list, so trigger 1 alone misses it.
+    ocr_text, ocr_cover_only = "", False
     caption = (meta.get("description") or meta.get("title") or "").strip()
     substance = re.sub(r"#\w+", "", f"{caption} {transcript}").strip()
-    if len(substance) < 80:
+    is_listicle = bool(LISTICLE_RE.search(caption))
+    if len(substance) < 80 or is_listicle:
         try:
-            ocr_text = ocr_screen_text(url)
+            ocr_text, ocr_cover_only = ocr_screen_text(url, meta.get("duration") or 0)
         except Exception as e:
             log.info("ocr failed for %s: %s", url, e)
         if ocr_text:
-            fetch_note = (fetch_note + "; " if fetch_note else "") + "ocr salvaged on-screen text"
+            if ocr_cover_only:
+                # The full video was walled (anonymous fetch failed) — only
+                # the cover/intro frame was reachable. Say so explicitly, so
+                # a listicle whose real payload is later in the video reads
+                # as "genuinely unreachable" downstream, not "OCR skipped it".
+                note = "ocr: cover frame only, full video unreachable anonymously"
+            elif is_listicle:
+                note = "ocr: listicle items"
+            else:
+                note = "ocr salvaged on-screen text"
+            fetch_note = (fetch_note + "; " if fetch_note else "") + note
             if not meta:
                 meta = {"title": "", "description": ""}
     return {"meta": meta, "transcript": transcript,
             "alt_texts": alt_texts, "ocr_text": ocr_text,
-            "fetch_note": fetch_note}
+            "ocr_cover_only": ocr_cover_only, "fetch_note": fetch_note}
 
 
 def vault_append_partial(url, fetched, error):

@@ -20,6 +20,13 @@ EnvironmentFile=/home/quorky/.config/reels-capture.env
 EnvironmentFile=/home/quorky/.config/claude-cli.env
 Environment=CAPTURE_HOST=127.0.0.1
 Environment=CAPTURE_PORT=8093
+# Opt-in only (specs/decisions.md, "'No cookies, ever' loosened to opt-in",
+# 2026-07-25). Unset = fully anonymous fetch, unchanged from before that date.
+# To enable: export your own Instagram session as data/ig-cookies.txt
+# (Netscape cookies.txt format, e.g. via a "Get cookies.txt LOCALLY"-style
+# browser extension — already covered by capture/.gitignore's `data/` rule),
+# then uncomment the next line.
+#Environment=YTDLP_COOKIES_FILE=/home/quorky/apps/reels-reader/capture/data/ig-cookies.txt
 ExecStart=/usr/bin/python3 /home/quorky/apps/reels-reader/capture/server.py
 Restart=on-failure
 RestartSec=5

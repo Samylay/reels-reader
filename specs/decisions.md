@@ -224,3 +224,38 @@ reply says so honestly — no login, no cookies, ever.
 **Rejected:** n8n Telegram *Trigger* as the inbound path — Telegram triggers need a
 public webhook URL and n8n is deliberately tailnet-only. Long-polling the same bot
 is free because n8n only ever *sends* (verified: getWebhookInfo url is empty).
+
+---
+
+## "No cookies, ever" loosened to opt-in (2026-07-25)
+
+**Decision:** Samy explicitly authorized loosening the "no login, no cookies, ever"
+line above, after hitting a concrete case: a sponsored listicle reel
+(`instagram.com/p/DbHrIucDv38`, "5 vibecoding websites you should abuse") where
+`yt-dlp` anonymous fetch fails outright ("Instagram sent an empty media response"),
+so only the embed page's single cover/hook frame was OCR-able — the actual payload
+(the 5 named sites) lives later in the video and was structurally unreachable.
+Samy's own framing: "if i save a listicle it's because i WANT the items on that
+list."
+
+**What changed:** `yt-dlp` calls (`ytdlp_json`, `ytdlp_audio`, `sample_video_frames`)
+now accept an optional `YTDLP_COOKIES_FILE` env var pointing at a cookies.txt
+(Netscape format, e.g. exported via a "Get cookies.txt LOCALLY"-style browser
+extension from Samy's own logged-in session) and pass `--cookies <path>` when set.
+
+**Still true, unchanged:**
+- **No headless browser** stays banned — this is a *static exported session*, not
+  live automated login/browsing, and it's the headless-browser pattern that carries
+  the real ban-risk per the original reasoning here.
+- **Opt-in only.** `YTDLP_COOKIES_FILE` unset (the default) = fully anonymous
+  behavior, byte-for-byte what this file originally described.
+- **Samy supplies the cookie file himself** — no agent generates, reads, or
+  transmits the actual credential (same pattern as any other homelab secret).
+  Path: gitignored, chmod 600, never committed.
+
+**Real risk, stated plainly:** using a real Instagram session's cookies to scrape
+is a ToS violation and can get that account rate-limited or restricted. This is a
+materially bigger risk than the rest of this project's "worst case is an honest
+failure reply" posture — Samy accepted that tradeoff explicitly and in writing
+here, for this specific failure mode (public posts Instagram walls anonymously),
+not as a blanket "always use cookies" default.
