@@ -35,6 +35,7 @@ Config via environment (see reels-capture.service):
 """
 
 import html
+from html.parser import HTMLParser
 import json
 import logging
 import os
@@ -289,16 +290,46 @@ def embed_caption(url):
     return embed_caption_from_html(fetch_embed_page(url))
 
 
+class _ImageAltParser(HTMLParser):
+    """Extract image alt attributes in source order without regex lossiness."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.alts = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag.lower() != "img":
+            return
+        for name, value in attrs:
+            if name.lower() == "alt" and value is not None:
+                self.alts.append(value)
+
+
 def extract_alt_texts(body: str) -> list:
-    """Image alt text is IG's own accessibility OCR — cheap/rich signal (see
-    decisions.md "Alt-text-first"). Pull it straight from the embed HTML, dedup,
-    drop blanks."""
+    """Instagram accessibility text in image/source order.
+
+    This is Instagram's own OCR for text-heavy slides. Keep the first exact
+    decoded string for every distinct image description. Parsing attributes
+    rather than regex supports single quotes, entity encoding, and multiline
+    text without altering the text the post supplied.
+    """
+    parser = _ImageAltParser()
+    parser.feed(body)
+    parser.close()
     seen = []
-    for raw in re.findall(r'alt="([^"]*)"', body):
-        text = html.unescape(raw).strip()
+    for raw in parser.alts:
+        text = raw.strip()
         if text and text not in seen:
             seen.append(text)
     return seen
+
+
+ALT_TEXT_OCR_RE = re.compile(r"\btext\s+that\s+says\b", re.I)
+
+
+def readable_alt_texts(alt_texts: list) -> list:
+    """Only text-bearing IG accessibility descriptions satisfy the alt-first rule."""
+    return [text for text in alt_texts if ALT_TEXT_OCR_RE.search(text)]
 
 
 def poster_url_from_embed(body: str) -> str:
@@ -320,7 +351,7 @@ def sample_video_frames(url: str, td: str, duration_s: float = 0) -> list:
     unreachable."""
     out = os.path.join(td, "v.%(ext)s")
     r = subprocess.run(
-        [YTDLP_BIN, "-f", "best[height<=720]/best", "--no-playlist",
+        [YTDLP_BIN, "-f", "best[height<=1080]/best", "--no-playlist",
          "--no-warnings", *_ytdlp_cookie_args(), "-o", out, url],
         capture_output=True, text=True, timeout=300,
     )
@@ -529,15 +560,23 @@ def fetch_content(url: str) -> dict:
     #     items live in on-screen text almost every time, and an ad/promo
     #     caption is often long (sponsor tag, hashtags, CTA) while still
     #     containing NONE of the actual list, so trigger 1 alone misses it.
-    ocr_text, ocr_cover_only = "", False
+    ocr_text, ocr_cover_only, ocr_status = "", False, "not-needed"
     caption = (meta.get("description") or meta.get("title") or "").strip()
-    substance = re.sub(r"#\w+", "", f"{caption} {transcript}").strip()
+    # A text-bearing IG alt attribute is source evidence, not a generic photo
+    # description. Count it when deciding whether expensive vision OCR is
+    # needed, otherwise a complete carousel's own OCR is ignored and its cover
+    # is needlessly re-read as if the post were empty.
+    alt_text = " ".join(readable_alt_texts(alt_texts))
+    substance = re.sub(r"#\w+", "", f"{caption} {transcript} {alt_text}").strip()
     is_listicle = bool(LISTICLE_RE.search(caption))
     if len(substance) < 80 or is_listicle:
+        ocr_status = "requested"
         try:
             ocr_text, ocr_cover_only = ocr_screen_text(url, meta.get("duration") or 0)
         except Exception as e:
             log.info("ocr failed for %s: %s", url, e)
+            ocr_status = "failed"
+            fetch_note = (fetch_note + "; " if fetch_note else "") + "ocr: failed"
         if ocr_text:
             if ocr_cover_only:
                 # The full video was walled (anonymous fetch failed) — only
@@ -550,11 +589,16 @@ def fetch_content(url: str) -> dict:
             else:
                 note = "ocr salvaged on-screen text"
             fetch_note = (fetch_note + "; " if fetch_note else "") + note
+            ocr_status = "cover-only" if ocr_cover_only else "sampled"
+        elif ocr_status == "requested":
+            # An attempted OCR with no text differs from an OCR that never ran.
+            ocr_status = "no-readable-text"
             if not meta:
                 meta = {"title": "", "description": ""}
     return {"meta": meta, "transcript": transcript,
             "alt_texts": alt_texts, "ocr_text": ocr_text,
-            "ocr_cover_only": ocr_cover_only, "fetch_note": fetch_note}
+            "ocr_cover_only": ocr_cover_only, "ocr_status": ocr_status,
+            "fetch_note": fetch_note}
 
 
 def vault_append_partial(url, fetched, error):
