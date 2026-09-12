@@ -50,6 +50,15 @@ import urllib.parse
 import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
+import evidence as evidence_store
+from evidence import (
+    add_ocr,
+    extract_evidence as extract_shared_evidence,
+    legacy_content,
+    load_evidence,
+    save_evidence,
+)
+
 HOME = "/home/quorky"
 BASE = os.path.dirname(os.path.abspath(__file__))
 
@@ -67,6 +76,7 @@ FFMPEG_BIN = os.environ.get("FFMPEG_BIN", "/usr/bin/ffmpeg")
 # Samy supplies this file himself (exported from his own logged-in session);
 # no agent generates, reads, or transmits its contents.
 YTDLP_COOKIES_FILE = os.environ.get("YTDLP_COOKIES_FILE", "")
+EVIDENCE_DIR = evidence_store.EVIDENCE_DIR
 
 
 def _ytdlp_cookie_args() -> list:
@@ -84,6 +94,16 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("reels-capture")
+
+
+def _load_capture_evidence(url: str):
+    evidence_store.EVIDENCE_DIR = EVIDENCE_DIR
+    return load_evidence(normalize(url))
+
+
+def _save_capture_evidence(bundle):
+    evidence_store.EVIDENCE_DIR = EVIDENCE_DIR
+    return save_evidence(bundle)
 
 IG_URL_RE = re.compile(
     r"https?://(?:www\.)?instagram\.com/(?:[\w.]+/)?(?:p|reel|reels|tv)/[\w-]+", re.I
@@ -267,6 +287,41 @@ def ytdlp_audio(url) -> bytes:
         if len(data) > MAX_AUDIO_BYTES:
             raise RuntimeError(f"audio too large ({len(data)} bytes)")
         return data
+
+
+def ytdlp_video_file(url: str, path: str) -> str:
+    """Download one bounded temporary video for shared evidence extraction."""
+    result = subprocess.run(
+        [YTDLP_BIN, "-f", "best[height<=1080]/best", "--no-playlist",
+         "--no-warnings", *_ytdlp_cookie_args(), "-o", path, url],
+        capture_output=True, text=True, timeout=300,
+    )
+    if result.returncode != 0 or not os.path.isfile(path):
+        raise RuntimeError("video download failed")
+    return path
+
+
+def extract_audio_file(video_path: str, path: str) -> str:
+    """Extract a small local Whisper input from a temporary video."""
+    result = subprocess.run(
+        [FFMPEG_BIN, "-loglevel", "error", "-y", "-i", video_path,
+         "-vn", "-ac", "1", "-ar", "16000", "-c:a", "libopus", "-b:a", "48k", path],
+        capture_output=True, timeout=120,
+    )
+    if result.returncode != 0 or not os.path.isfile(path):
+        raise RuntimeError("audio extraction failed")
+    return path
+
+
+def download_image_file(url: str, path: str) -> str:
+    """Download a public cover image into the extractor's temp directory."""
+    request = urllib.request.Request(url, headers={"User-Agent": UA})
+    with urllib.request.urlopen(request, timeout=30) as response, open(path, "wb") as stream:
+        data = response.read(6 * 1024 * 1024 + 1)
+        if len(data) > 6 * 1024 * 1024:
+            raise RuntimeError("cover image too large")
+        stream.write(data)
+    return path
 
 
 def fetch_embed_page(url):
@@ -516,10 +571,64 @@ def reply(text):
 
 # --- pipeline ---------------------------------------------------------------
 
+
+class _EvidenceOCR:
+    """Use the existing local vision OCR adapter for a fallback cover frame."""
+
+    def read(self, path: str) -> dict:
+        return {"text": ocr_images([path])}
+
+
+def extract_capture_evidence(url: str):
+    """Extract one capture through triage's shared EvidenceBundle contract.
+
+    The old ``fetch_content`` function below remains a compatibility adapter
+    for callers that need its dictionary shape. The worker uses this function,
+    so evidence is the source of truth for new captures and retries.
+    """
+    bundle = extract_shared_evidence(
+        normalize(url),
+        metadata=ytdlp_json,
+        embed_page=fetch_embed_page,
+        embed_caption=embed_caption_from_html,
+        embed_alts=extract_alt_texts,
+        download_video=ytdlp_video_file,
+        extract_audio=extract_audio_file,
+        download_image=download_image_file,
+        transcribe=transcribe,
+        ocr=_EvidenceOCR(),
+    )
+    fetched = legacy_content(bundle)
+    # Preserve the existing listicle/thin-content OCR policy. The shared
+    # extractor stores this result as a segment before the bundle is cached.
+    caption = (fetched["meta"].get("description") or fetched["meta"].get("title") or "").strip()
+    alt_text = " ".join(readable_alt_texts(fetched.get("alt_texts") or []))
+    substance = re.sub(r"#\w+", "", f"{caption} {fetched.get('transcript') or ''} {alt_text}").strip()
+    is_listicle = bool(LISTICLE_RE.search(caption))
+    if len(substance) < 80 or is_listicle:
+        try:
+            ocr_text, ocr_cover_only = ocr_screen_text(url, fetched["meta"].get("duration") or 0)
+        except Exception as error:
+            log.info("ocr failed for %s: %s", url, error)
+            ocr_text, ocr_cover_only = "", False
+        if ocr_text:
+            bundle = add_ocr(bundle, ocr_text, cover_only=ocr_cover_only)
+    return bundle
+
+
+def _cached_or_extract(url: str):
+    """Read one valid versioned bundle, extracting and saving only on miss."""
+    cached = _load_capture_evidence(url)
+    if cached is not None:
+        return cached
+    bundle = extract_capture_evidence(url)
+    _save_capture_evidence(bundle)
+    return bundle
+
 def fetch_content(url: str) -> dict:
     """Side-effect-free content fetch for one IG URL — no ledger, no vault, no
-    Telegram, safe to import from other services (the triage study step reuses
-    it). yt-dlp metadata with /embed/captioned/ caption fallback, alt-texts,
+    Telegram, kept as a compatibility adapter for older callers. yt-dlp
+    metadata with /embed/captioned/ caption fallback, alt-texts,
     and a Whisper transcript when the post is a video yt-dlp can reach
     anonymously. Best-effort: returns whatever partial text exists.
 
@@ -641,14 +750,24 @@ def process(url):
                note=prior.get("note") or "")
     stage, fetched = "fetch", None
     try:
-        if resumed.get("meta"):
+        cached_bundle = _load_capture_evidence(url)
+        if cached_bundle is not None:
+            # Evidence is immutable for one extraction version. A summary
+            # retry must reuse it and never repeat Instagram/media work.
+            fetched = legacy_content(cached_bundle)
+            log.info("using cached evidence for %s", url)
+        elif resumed.get("meta"):
             # Resume: content already fetched on a prior attempt — skip
             # yt-dlp/Whisper entirely and go straight to the failed stage.
             fetched = resumed
             log.info("retrying %s from stage '%s' with persisted partial",
                      url, prior.get("stage") or "summarize")
         else:
-            fetched = fetch_content(url)
+            bundle = extract_capture_evidence(url)
+            # This write must complete before summarize() is called. A model
+            # failure therefore leaves durable, source-preserving evidence.
+            _save_capture_evidence(bundle)
+            fetched = legacy_content(bundle)
         meta, transcript = fetched["meta"], fetched["transcript"]
         alt_texts = fetched.get("alt_texts") or []
         fetch_note = fetched.get("fetch_note") or ""
