@@ -48,6 +48,10 @@ def _embed_image_url(body: str) -> str:
     return ""
 
 
+def _is_reel_url(url: str) -> bool:
+    return bool(re.search(r"/(?:reel|reels|tv)/", url, re.IGNORECASE))
+
+
 def _package() -> tuple[Any, Any]:
     """Load the shared package and Instagram adapter from its configured root."""
     root = os.path.abspath(EXTRACTION_ROOT)
@@ -113,7 +117,7 @@ class _Downloader:
             self._embed_bodies[url] = body
             caption = self._embed_caption(body) if self._embed_caption else ""
             alts = self._embed_alts(body) if self._embed_alts else []
-            if not caption and not alts:
+            if not caption and not alts and not _embed_image_url(body):
                 raise
             value = {"title": "", "description": caption}
 
@@ -176,11 +180,12 @@ class _Downloader:
                 alts = self._embed_alts(body) if self._embed_alts else []
                 image_url = _embed_image_url(body)
                 if (alts or image_url) and not any(value.get(key) for key in ("children", "carousel", "media", "items", "entries")):
+                    is_reel = _is_reel_url(url)
                     value["children"] = [
                         # The embed page is not a child media URL. Preserve
                         # its alt evidence without making the parent webpage
                         # look downloadable.
-                        {"id": f"embed-slide-{index}", "type": "image", "url": image_url if index == 1 else "", "alt_text": alt}
+                        {"id": f"embed-slide-{index}", "type": "video" if is_reel else "image", "url": image_url if not is_reel and index == 1 else "", "cover_url": image_url if is_reel and index == 1 else "", "alt_text": alt}
                         for index, alt in enumerate(alts or [""], start=1)
                     ]
             except Exception:

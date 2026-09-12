@@ -231,6 +231,35 @@ assert sys.path == before
         self.assertTrue(any(segment.text == "poster words" for segment in bundle.segments))
         self.assertEqual(bundle_from_dict(bundle.as_dict()).bundle_id, bundle.bundle_id)
 
+    def test_startup_entrypoint_keeps_failed_reel_state_with_poster_only_embed(self):
+        image_url = "https://cdn.test/reel-poster.jpg?oe=1&amp;sig=abc"
+        body = (
+            '<img class="avatar" src="https://cdn.test/avatar.jpg">'
+            f'<img class="EmbeddedMediaImage" src="{image_url}">'
+        )
+
+        def download_image(url, path, *_args):
+            self.assertEqual(url, image_url.replace("&amp;", "&"))
+            with open(path, "wb") as stream:
+                stream.write(b"poster")
+            return path
+
+        with patch.object(server, "ytdlp_json", side_effect=RuntimeError("reel unavailable")), \
+             patch.object(server, "fetch_embed_page", return_value=body), \
+             patch.object(server, "embed_caption_from_html", return_value=""), \
+             patch.object(server, "extract_alt_texts", return_value=[]), \
+             patch.object(server, "download_image_file", side_effect=download_image), \
+             patch.object(server, "ocr_images", return_value="cover words"):
+            bundle = server.extract_capture_evidence("https://instagram.com/reel/startup-poster")
+
+        self.assertTrue(any(source.kind == "video" for source in bundle.sources))
+        self.assertTrue(any(segment.text == "cover words" for segment in bundle.segments))
+        self.assertTrue(any(item.aspect == "frames" and item.reason_code == "cover_only" for item in bundle.coverage))
+        self.assertTrue(any(item.aspect == "video" and item.status == "unavailable" for item in bundle.coverage))
+        self.assertTrue(any(item.aspect == "transcript" and item.status == "unavailable" for item in bundle.coverage))
+        self.assertEqual(bundle.quality, "limited")
+        self.assertTrue(all(source.url.startswith(("http://", "https://")) for source in bundle.sources))
+
 
 if __name__ == "__main__":
     unittest.main()
