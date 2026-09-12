@@ -8,6 +8,7 @@ capture server, which keeps the dependency direction one-way.
 from __future__ import annotations
 
 from datetime import datetime
+import html
 import hashlib
 import importlib
 import json
@@ -32,14 +33,18 @@ EVIDENCE_DIR = os.environ.get(
 def _embed_image_url(body: str) -> str:
     """Extract the public embed poster/image URL without treating the page as media."""
     patterns = (
+        r'<img(?=[^>]*class=["\'][^"\']*EmbeddedMediaImage)[^>]*src=["\']([^"\']+)',
+        r'<img(?=[^>]*src=["\']([^"\']+))(?=[^>]*class=["\'][^"\']*EmbeddedMediaImage)',
         r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)',
         r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
         r'<img[^>]+src=["\'](https?://[^"\']+)',
     )
     for pattern in patterns:
         match = re.search(pattern, body, re.IGNORECASE)
-        if match and match.group(1).startswith(("http://", "https://")):
-            return match.group(1)
+        if match:
+            value = html.unescape(match.group(1))
+            if value.startswith(("http://", "https://")):
+                return value
     return ""
 
 
@@ -169,14 +174,14 @@ class _Downloader:
                 if deadline is not None and time.monotonic() >= deadline:
                     raise TimeoutError("extraction deadline exceeded")
                 alts = self._embed_alts(body) if self._embed_alts else []
-                if alts and not any(value.get(key) for key in ("children", "carousel", "media", "items", "entries")):
-                    image_url = _embed_image_url(body)
+                image_url = _embed_image_url(body)
+                if (alts or image_url) and not any(value.get(key) for key in ("children", "carousel", "media", "items", "entries")):
                     value["children"] = [
                         # The embed page is not a child media URL. Preserve
                         # its alt evidence without making the parent webpage
                         # look downloadable.
                         {"id": f"embed-slide-{index}", "type": "image", "url": image_url if index == 1 else "", "alt_text": alt}
-                        for index, alt in enumerate(alts, start=1)
+                        for index, alt in enumerate(alts or [""], start=1)
                     ]
             except Exception:
                 pass

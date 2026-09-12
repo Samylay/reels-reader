@@ -196,7 +196,7 @@ assert sys.path == before
         self.assertIs(extract.call_args.kwargs["limits"], bounds)
 
     def test_embed_fallback_preserves_poster_and_contract_shape(self):
-        image_url = "https://cdn.test/embed-poster.jpg"
+        image_url = "https://cdn.test/embed-poster.jpg?oe=1&sig=abc"
         calls = []
 
         def metadata(_url):
@@ -208,19 +208,27 @@ assert sys.path == before
                 stream.write(b"poster")
             return path
 
+        class OCR:
+            def read(self, _path, *_args):
+                return {"text": "poster words"}
+
         bundle = bridge_extract(
             "https://instagram.com/p/embed-fallback", metadata=metadata,
-            embed_page=lambda _url: f'<meta property="og:image" content="{image_url}">',
+            embed_page=lambda _url: (
+                '<img class="avatar" src="https://cdn.test/avatar.jpg">'
+                f'<img class="EmbeddedMediaImage" src="{image_url.replace("&", "&amp;")}">'
+            ),
             embed_caption=lambda _body: "Embed caption",
-            embed_alts=lambda _body: ["A photo"],
+            embed_alts=lambda _body: [],
             download_image=download_image,
-            ocr=lambda *_args: {"text": "poster words"},
+            ocr=OCR(),
         )
         self.assertTrue(all(source.url.startswith(("http://", "https://")) for source in bundle.sources))
         image_source = next(source for source in bundle.sources if source.kind == "image")
         self.assertEqual(image_source.url, bundle.canonical_url)
         self.assertEqual(image_source.media_metadata["mediaUrl"], image_url)
         self.assertEqual(calls, [image_url])
+        self.assertTrue(any(segment.text == "poster words" for segment in bundle.segments))
         self.assertEqual(bundle_from_dict(bundle.as_dict()).bundle_id, bundle.bundle_id)
 
 
