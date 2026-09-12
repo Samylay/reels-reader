@@ -35,6 +35,7 @@ Config via environment (see reels-capture.service):
 """
 
 import html
+import glob
 from html.parser import HTMLParser
 import json
 import logging
@@ -315,25 +316,55 @@ def ytdlp_video_file(url: str, path: str, deadline: float | None = None) -> str:
     command = [YTDLP_BIN, "-f", "best[height<=1080]/best", "--no-playlist",
                "--no-warnings", "--max-filesize", "64M", *_ytdlp_cookie_args(), "-o", path, url]
     process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def matching_outputs() -> list[str]:
+        directory = os.path.dirname(path) or "."
+        prefix = os.path.basename(path)
+        stem = os.path.splitext(prefix)[0]
+        candidates = set(glob.glob(os.path.join(directory, prefix + "*")))
+        candidates.update(glob.glob(os.path.join(directory, stem + "*")))
+        return sorted(candidate for candidate in candidates if os.path.isfile(candidate))
+
+    def cleanup_outputs() -> None:
+        for candidate in matching_outputs():
+            try:
+                os.unlink(candidate)
+            except FileNotFoundError:
+                pass
+
+    def stop_process() -> None:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+
     try:
         while process.poll() is None:
-            if os.path.exists(path) and os.path.getsize(path) > MAX_VIDEO_BYTES:
-                process.terminate()
-                process.wait(timeout=5)
+            outputs = matching_outputs()
+            sizes = [os.path.getsize(candidate) for candidate in outputs]
+            if any(size > MAX_VIDEO_BYTES for size in sizes) or sum(sizes) > MAX_VIDEO_BYTES:
+                stop_process()
+                cleanup_outputs()
                 raise RuntimeError("video limit exceeded")
             if deadline is not None and time.monotonic() >= deadline:
-                process.terminate()
-                process.wait(timeout=5)
+                stop_process()
+                cleanup_outputs()
                 raise TimeoutError("extraction deadline exceeded")
-            time.sleep(0.1)
+            time.sleep(0.05)
+    except BaseException:
+        cleanup_outputs()
+        raise
     finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait()
+        stop_process()
     _deadline_timeout(deadline, 1)
     if process.returncode != 0 or not os.path.isfile(path):
+        cleanup_outputs()
         raise RuntimeError("video download failed")
     if os.path.getsize(path) > MAX_VIDEO_BYTES:
+        cleanup_outputs()
         raise RuntimeError("video limit exceeded")
     return path
 
@@ -692,12 +723,14 @@ class _EvidenceFrameExtractor:
         return paths
 
 
-def extract_capture_evidence(url: str):
+def extract_capture_evidence(url: str, *, deadline: float | None = None, limits=None):
     """Extract one capture through triage's shared EvidenceBundle contract.
 
     The old ``fetch_content`` function below remains a compatibility adapter
     for callers that need its dictionary shape. The worker uses this function,
-    so evidence is the source of truth for new captures and retries.
+    so evidence is the source of truth for new captures and retries. ``deadline``
+    is one absolute monotonic deadline shared by metadata, media, audio, OCR,
+    and frame work. Optional ``limits`` is the shared Instagram bounds object.
     """
     ocr = _EvidenceOCR()
     bundle = extract_shared_evidence(
@@ -712,6 +745,8 @@ def extract_capture_evidence(url: str):
         transcribe=transcribe_structured,
         ocr=ocr,
         frame_extractor=_EvidenceFrameExtractor(),
+        deadline=deadline,
+        limits=limits,
     )
     return bundle
 

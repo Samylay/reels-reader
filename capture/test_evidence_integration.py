@@ -109,8 +109,11 @@ assert sys.path == before
         class Media:
             def metadata(self, _url):
                 return {"caption": "mixed", "entries": [
-                    {"id": "video", "webpage_url": "https://cdn.test/reel.mp4", "duration": 2, "ext": "mp4"},
-                    {"id": "image", "thumbnail": "https://cdn.test/slide.jpg", "alt_text": "A photo"},
+                    {"id": "video", "webpage_url": "https://instagram.com/reel/child", "duration": 2,
+                     "formats": [{"url": "https://cdn.test/reel.mp4", "vcodec": "h264", "ext": "mp4"}],
+                     "thumbnails": [{"url": "https://cdn.test/cover.jpg"}]},
+                    {"id": "image", "webpage_url": "https://instagram.com/p/slide",
+                     "thumbnails": [{"url": "https://cdn.test/slide.jpg"}], "alt_text": "A photo"},
                 ]}
 
             def download_video(self, _url, path, *_args):
@@ -148,8 +151,46 @@ assert sys.path == before
         )
         self.assertEqual([source.order for source in bundle.sources[1:]], [1, 2])
         self.assertTrue(any(source.kind == "video" for source in bundle.sources))
+        self.assertNotIn("instagram.com", next(source.url for source in bundle.sources if source.kind == "video"))
+        self.assertEqual(next(source.url for source in bundle.sources if source.kind == "image"), "https://cdn.test/slide.jpg")
         self.assertTrue(any(segment.kind == "ocr" and segment.text == "overlay" for segment in bundle.segments))
         self.assertTrue(any(item.reason_code == "frame_extractor_partial" for item in bundle.coverage))
+
+    def test_ytdlp_part_file_is_capped_and_cleaned(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "video.bin")
+
+            class Process:
+                returncode = None
+
+                def poll(self):
+                    return None if self.returncode is None else self.returncode
+
+                def terminate(self):
+                    self.returncode = -15
+
+                def wait(self, timeout=None):
+                    return self.returncode
+
+                def kill(self):
+                    self.returncode = -9
+
+            partial = path + ".part"
+            with open(partial, "wb") as stream:
+                stream.truncate(server.MAX_VIDEO_BYTES + 1)
+            with patch.object(server.subprocess, "Popen", return_value=Process()), patch.object(server.time, "sleep"):
+                with self.assertRaisesRegex(RuntimeError, "video limit exceeded"):
+                    server.ytdlp_video_file("https://instagram.com/reel/oversized", path)
+            self.assertFalse(os.path.exists(partial))
+
+    def test_complete_entrypoint_accepts_one_absolute_deadline_and_bounds(self):
+        deadline = 1234.5
+        bounds = object()
+        bundle = self.bundle("https://instagram.com/p/entrypoint")
+        with patch.object(server, "extract_shared_evidence", return_value=bundle) as extract:
+            self.assertIs(server.extract_capture_evidence(bundle.requested_url, deadline=deadline, limits=bounds), bundle)
+        self.assertEqual(extract.call_args.kwargs["deadline"], deadline)
+        self.assertIs(extract.call_args.kwargs["limits"], bounds)
 
 
 if __name__ == "__main__":

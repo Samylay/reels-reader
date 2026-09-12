@@ -104,7 +104,30 @@ class _Downloader:
                 if not isinstance(entry, Mapping):
                     continue
                 child = dict(entry)
-                child.setdefault("url", child.get("webpage_url") or child.get("video_url") or child.get("thumbnail") or "")
+                webpage_url = str(child.get("webpage_url") or "")
+                formats = child.get("formats") if isinstance(child.get("formats"), list) else []
+                is_video = bool(child.get("duration") or child.get("video_url") or formats)
+                direct_url = str(child.get("video_url") or "") if is_video else ""
+                if is_video and not direct_url:
+                    direct_url = next(
+                        (str(fmt.get("url")) for fmt in formats
+                         if isinstance(fmt, Mapping) and fmt.get("url")
+                         and (fmt.get("vcodec") is None or str(fmt.get("vcodec")) != "none")),
+                        "",
+                    )
+                if not direct_url:
+                    candidate = child.get("url")
+                    if candidate and str(candidate) != webpage_url:
+                        direct_url = str(candidate)
+                if not direct_url and not is_video:
+                    thumbnails = child.get("thumbnails") if isinstance(child.get("thumbnails"), list) else []
+                    direct_url = next(
+                        (str(item.get("url")) for item in thumbnails
+                         if isinstance(item, Mapping) and item.get("url")),
+                        "",
+                    )
+                    direct_url = direct_url or str(child.get("thumbnail") or "")
+                child["url"] = direct_url
                 if not child.get("type") and (child.get("duration") or child.get("video_url") or child.get("formats")):
                     child["type"] = "video"
                 normalized_entries.append(child)
@@ -133,7 +156,10 @@ class _Downloader:
                 alts = self._embed_alts(body) if self._embed_alts else []
                 if alts and not any(value.get(key) for key in ("children", "carousel", "media", "items", "entries")):
                     value["children"] = [
-                        {"id": f"embed-slide-{index}", "type": "image", "url": url, "alt_text": alt}
+                        # The embed page is not a child media URL. Preserve
+                        # its alt evidence without making the parent webpage
+                        # look downloadable.
+                        {"id": f"embed-slide-{index}", "type": "image", "url": "", "alt_text": alt}
                         for index, alt in enumerate(alts, start=1)
                     ]
             except Exception:
@@ -195,6 +221,7 @@ def extract_evidence(
     vision: Any | None = None,
     frame_extractor: Any | None = None,
     limits: Any | None = None,
+    deadline: float | None = None,
     now: datetime | str | None = None,
 ) -> Any:
     """Run bounded Instagram extraction with capture-owned adapters."""
@@ -219,6 +246,8 @@ def extract_evidence(
         kwargs["transcriber"] = _Transcriber(transcribe)
     if limits is not None:
         kwargs["limits"] = limits
+    if deadline is not None:
+        kwargs["deadline"] = deadline
     return instagram.extract_instagram(url, **kwargs)
 
 
