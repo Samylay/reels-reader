@@ -646,12 +646,35 @@ class _EvidenceFrameExtractor:
              "-vf", "select=gt(scene\\,0.25),showinfo", "-an", "-f", "null", "-"],
             capture_output=True, text=True, timeout=min(60, remaining),
         )
-        times = []
+        scene_times = []
         for line in result.stderr.splitlines():
             match = re.search(r"pts_time:([0-9.]+)", line)
             if match:
-                times.append(round(float(match.group(1)) * 1000))
-        return times, times
+                scene_times.append(round(float(match.group(1)) * 1000))
+
+        # A second, tiny grayscale stream catches brief overlays that do not
+        # cross the scene threshold. It is intentionally lightweight and
+        # bounded, and its timestamps are candidates rather than claims of
+        # semantic text recognition.
+        _deadline_timeout(deadline, 60)
+        diff = subprocess.run(
+            [FFMPEG_BIN, "-hide_banner", "-i", video_path,
+             "-vf", "fps=2,scale=32:18,format=gray", "-an", "-f", "rawvideo", "-"],
+            capture_output=True, timeout=min(60, _deadline_timeout(deadline, 60)),
+        )
+        frame_size = 32 * 18
+        text_change_times = []
+        previous = None
+        for index in range(0, len(diff.stdout) // frame_size):
+            frame = diff.stdout[index * frame_size:(index + 1) * frame_size]
+            if previous is not None:
+                mean_delta = sum(abs(left - right) for left, right in zip(frame, previous)) / frame_size
+                if mean_delta >= 12:
+                    timestamp = index * 500
+                    if duration_ms <= 0 or timestamp <= duration_ms:
+                        text_change_times.append(timestamp)
+            previous = frame
+        return sorted(set(scene_times)), sorted(set(text_change_times))
 
     def extract_frames(self, video_path, candidates, directory, deadline):
         paths = []
