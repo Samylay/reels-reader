@@ -13,6 +13,7 @@ import importlib
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import tempfile
 import time
@@ -26,6 +27,20 @@ EVIDENCE_DIR = os.environ.get(
     "CAPTURE_EVIDENCE_DIR",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "evidence"),
 )
+
+
+def _embed_image_url(body: str) -> str:
+    """Extract the public embed poster/image URL without treating the page as media."""
+    patterns = (
+        r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
+        r'<img[^>]+src=["\'](https?://[^"\']+)',
+    )
+    for pattern in patterns:
+        match = re.search(pattern, body, re.IGNORECASE)
+        if match and match.group(1).startswith(("http://", "https://")):
+            return match.group(1)
+    return ""
 
 
 def _package() -> tuple[Any, Any]:
@@ -155,11 +170,12 @@ class _Downloader:
                     raise TimeoutError("extraction deadline exceeded")
                 alts = self._embed_alts(body) if self._embed_alts else []
                 if alts and not any(value.get(key) for key in ("children", "carousel", "media", "items", "entries")):
+                    image_url = _embed_image_url(body)
                     value["children"] = [
                         # The embed page is not a child media URL. Preserve
                         # its alt evidence without making the parent webpage
                         # look downloadable.
-                        {"id": f"embed-slide-{index}", "type": "image", "url": "", "alt_text": alt}
+                        {"id": f"embed-slide-{index}", "type": "image", "url": image_url if index == 1 else "", "alt_text": alt}
                         for index, alt in enumerate(alts, start=1)
                     ]
             except Exception:

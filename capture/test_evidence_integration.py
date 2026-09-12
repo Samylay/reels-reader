@@ -15,7 +15,7 @@ sys.path.insert(0, "/home/quorky/services/triage")
 import server  # noqa: E402
 import evidence as evidence_store  # noqa: E402
 from evidence import evidence_path, load_evidence  # noqa: E402
-from evidence import extract_evidence as bridge_extract  # noqa: E402
+from evidence import bundle_from_dict, extract_evidence as bridge_extract  # noqa: E402
 
 
 class EvidenceCaptureTests(unittest.TestCase):
@@ -151,8 +151,11 @@ assert sys.path == before
         )
         self.assertEqual([source.order for source in bundle.sources[1:]], [1, 2])
         self.assertTrue(any(source.kind == "video" for source in bundle.sources))
-        self.assertNotIn("instagram.com", next(source.url for source in bundle.sources if source.kind == "video"))
-        self.assertEqual(next(source.url for source in bundle.sources if source.kind == "image"), "https://cdn.test/slide.jpg")
+        video_source = next(source for source in bundle.sources if source.kind == "video")
+        image_source = next(source for source in bundle.sources if source.kind == "image")
+        self.assertTrue(video_source.url.startswith("https://instagram.com/"))
+        self.assertEqual(video_source.media_metadata["mediaUrl"], "https://cdn.test/reel.mp4")
+        self.assertEqual(image_source.media_metadata["mediaUrl"], "https://cdn.test/slide.jpg")
         self.assertTrue(any(segment.kind == "ocr" and segment.text == "overlay" for segment in bundle.segments))
         self.assertTrue(any(item.reason_code == "frame_extractor_partial" for item in bundle.coverage))
 
@@ -191,6 +194,34 @@ assert sys.path == before
             self.assertIs(server.extract_capture_evidence(bundle.requested_url, deadline=deadline, limits=bounds), bundle)
         self.assertEqual(extract.call_args.kwargs["deadline"], deadline)
         self.assertIs(extract.call_args.kwargs["limits"], bounds)
+
+    def test_embed_fallback_preserves_poster_and_contract_shape(self):
+        image_url = "https://cdn.test/embed-poster.jpg"
+        calls = []
+
+        def metadata(_url):
+            raise RuntimeError("anonymous metadata wall")
+
+        def download_image(url, path, *_args):
+            calls.append(url)
+            with open(path, "wb") as stream:
+                stream.write(b"poster")
+            return path
+
+        bundle = bridge_extract(
+            "https://instagram.com/p/embed-fallback", metadata=metadata,
+            embed_page=lambda _url: f'<meta property="og:image" content="{image_url}">',
+            embed_caption=lambda _body: "Embed caption",
+            embed_alts=lambda _body: ["A photo"],
+            download_image=download_image,
+            ocr=lambda *_args: {"text": "poster words"},
+        )
+        self.assertTrue(all(source.url.startswith(("http://", "https://")) for source in bundle.sources))
+        image_source = next(source for source in bundle.sources if source.kind == "image")
+        self.assertEqual(image_source.url, bundle.canonical_url)
+        self.assertEqual(image_source.media_metadata["mediaUrl"], image_url)
+        self.assertEqual(calls, [image_url])
+        self.assertEqual(bundle_from_dict(bundle.as_dict()).bundle_id, bundle.bundle_id)
 
 
 if __name__ == "__main__":
