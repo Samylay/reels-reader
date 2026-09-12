@@ -15,6 +15,7 @@ sys.path.insert(0, "/home/quorky/services/triage")
 import server  # noqa: E402
 import evidence as evidence_store  # noqa: E402
 from evidence import evidence_path, load_evidence  # noqa: E402
+from evidence import extract_evidence as bridge_extract  # noqa: E402
 
 
 class EvidenceCaptureTests(unittest.TestCase):
@@ -97,9 +98,58 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 assert module.evidence_store is not None
 assert os.path.dirname(path) not in sys.path
+before = list(sys.path)
+module.evidence_store._package()
+assert sys.path == before
 """
         result = subprocess.run([sys.executable, "-c", code], cwd="/tmp", capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_mixed_ytdlp_entries_process_video_and_vague_image(self):
+        class Media:
+            def metadata(self, _url):
+                return {"caption": "mixed", "entries": [
+                    {"id": "video", "webpage_url": "https://cdn.test/reel.mp4", "duration": 2, "ext": "mp4"},
+                    {"id": "image", "thumbnail": "https://cdn.test/slide.jpg", "alt_text": "A photo"},
+                ]}
+
+            def download_video(self, _url, path, *_args):
+                with open(path, "wb") as stream:
+                    stream.write(b"video")
+                return path
+
+            def extract_audio(self, _video, path, *_args):
+                with open(path, "wb") as stream:
+                    stream.write(b"audio")
+                return path
+
+            def download_image(self, _url, path, *_args):
+                with open(path, "wb") as stream:
+                    stream.write(b"image")
+                return path
+
+        class OCR:
+            def read(self, _path, *_args):
+                return {"text": "overlay"}
+
+        class Frames:
+            def extract_frames(self, _video, candidates, directory, *_args):
+                return []
+
+            def event_times(self, *_args):
+                return [], []
+
+        bundle = bridge_extract(
+            "https://instagram.com/p/mixed", metadata=Media().metadata,
+            download_video=Media().download_video, extract_audio=Media().extract_audio,
+            download_image=Media().download_image,
+            transcribe=lambda *_args: {"segments": [{"text": "spoken", "startMs": 0, "endMs": 1000}]},
+            ocr=OCR(), frame_extractor=Frames(),
+        )
+        self.assertEqual([source.order for source in bundle.sources[1:]], [1, 2])
+        self.assertTrue(any(source.kind == "video" for source in bundle.sources))
+        self.assertTrue(any(segment.kind == "ocr" and segment.text == "overlay" for segment in bundle.segments))
+        self.assertTrue(any(item.reason_code == "frame_extractor_partial" for item in bundle.coverage))
 
 
 if __name__ == "__main__":

@@ -110,6 +110,15 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("reels-capture")
 
 
+def _deadline_timeout(deadline: float | None, default: float) -> float:
+    if deadline is None:
+        return default
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("extraction deadline exceeded")
+    return min(default, remaining)
+
+
 def _load_capture_evidence(url: str):
     evidence_store.EVIDENCE_DIR = EVIDENCE_DIR
     return load_evidence(normalize(url))
@@ -273,14 +282,12 @@ def retry_sweep():
 
 # --- fetch ------------------------------------------------------------------
 
-def ytdlp_json(url):
-    r = subprocess.run(
-        [YTDLP_BIN, "-J", "--no-warnings", "--no-playlist", *_ytdlp_cookie_args(), url],
-        capture_output=True, text=True, timeout=120,
-    )
-    if r.returncode != 0:
-        raise RuntimeError(r.stderr.strip().splitlines()[-1] if r.stderr else "yt-dlp failed")
-    return json.loads(r.stdout)
+def ytdlp_json(url, deadline: float | None = None):
+    command = [YTDLP_BIN, "-J", "--no-warnings", "--no-playlist", *_ytdlp_cookie_args(), url]
+    result = subprocess.run(command, capture_output=True, text=True, timeout=_deadline_timeout(deadline, 120))
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip().splitlines()[-1] if result.stderr else "yt-dlp failed")
+    return json.loads(result.stdout)
 
 
 def ytdlp_audio(url) -> bytes:
@@ -303,36 +310,52 @@ def ytdlp_audio(url) -> bytes:
         return data
 
 
-def ytdlp_video_file(url: str, path: str) -> str:
+def ytdlp_video_file(url: str, path: str, deadline: float | None = None) -> str:
     """Download one bounded temporary video for shared evidence extraction."""
-    result = subprocess.run(
-        [YTDLP_BIN, "-f", "best[height<=1080]/best", "--no-playlist",
-         "--no-warnings", "--max-filesize", "64M", *_ytdlp_cookie_args(), "-o", path, url],
-        capture_output=True, text=True, timeout=300,
-    )
-    if result.returncode != 0 or not os.path.isfile(path):
+    command = [YTDLP_BIN, "-f", "best[height<=1080]/best", "--no-playlist",
+               "--no-warnings", "--max-filesize", "64M", *_ytdlp_cookie_args(), "-o", path, url]
+    process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        while process.poll() is None:
+            if os.path.exists(path) and os.path.getsize(path) > MAX_VIDEO_BYTES:
+                process.terminate()
+                process.wait(timeout=5)
+                raise RuntimeError("video limit exceeded")
+            if deadline is not None and time.monotonic() >= deadline:
+                process.terminate()
+                process.wait(timeout=5)
+                raise TimeoutError("extraction deadline exceeded")
+            time.sleep(0.1)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+    _deadline_timeout(deadline, 1)
+    if process.returncode != 0 or not os.path.isfile(path):
         raise RuntimeError("video download failed")
     if os.path.getsize(path) > MAX_VIDEO_BYTES:
         raise RuntimeError("video limit exceeded")
     return path
 
 
-def extract_audio_file(video_path: str, path: str) -> str:
+def extract_audio_file(video_path: str, path: str, deadline: float | None = None) -> str:
     """Extract a small local Whisper input from a temporary video."""
+    timeout = _deadline_timeout(deadline, 120)
     result = subprocess.run(
         [FFMPEG_BIN, "-loglevel", "error", "-y", "-i", video_path,
          "-vn", "-ac", "1", "-ar", "16000", "-c:a", "libopus", "-b:a", "48k", path],
-        capture_output=True, timeout=120,
+        capture_output=True, timeout=min(120, timeout),
     )
     if result.returncode != 0 or not os.path.isfile(path):
         raise RuntimeError("audio extraction failed")
     return path
 
 
-def download_image_file(url: str, path: str) -> str:
+def download_image_file(url: str, path: str, deadline: float | None = None) -> str:
     """Download a public cover image into the extractor's temp directory."""
     request = urllib.request.Request(url, headers={"User-Agent": UA})
-    with urllib.request.urlopen(request, timeout=30) as response, open(path, "wb") as stream:
+    timeout = _deadline_timeout(deadline, 30)
+    with urllib.request.urlopen(request, timeout=min(30, timeout)) as response, open(path, "wb") as stream:
         data = response.read(6 * 1024 * 1024 + 1)
         if len(data) > 6 * 1024 * 1024:
             raise RuntimeError("cover image too large")
@@ -340,11 +363,11 @@ def download_image_file(url: str, path: str) -> str:
     return path
 
 
-def fetch_embed_page(url):
+def fetch_embed_page(url, deadline: float | None = None):
     """Fetch Instagram's public /embed/captioned/ page (no auth, no headless browser)."""
     embed = normalize(url) + "/embed/captioned/"
     req = urllib.request.Request(embed, headers={"User-Agent": UA})
-    return urllib.request.urlopen(req, timeout=20).read().decode("utf-8", "replace")
+    return urllib.request.urlopen(req, timeout=_deadline_timeout(deadline, 20)).read().decode("utf-8", "replace")
 
 
 def embed_caption_from_html(body: str) -> str:
@@ -455,7 +478,7 @@ def sample_video_frames(url: str, td: str, duration_s: float = 0) -> list:
     )
 
 
-def ocr_images(paths: list) -> str:
+def ocr_images(paths: list, deadline: float | None = None) -> str:
     """Burned-in text via `claude -p` vision (the homelab's LLM backend — no
     tesseract dep). Merged + deduped across frames by the model itself."""
     prompt = (
@@ -466,9 +489,10 @@ def ocr_images(paths: list) -> str:
         "Output the transcribed text only, no commentary, no markdown. "
         "If there is no on-screen text, output exactly: NOTEXT"
     )
+    timeout = _deadline_timeout(deadline, 240)
     r = subprocess.run(
         [CLAUDE_BIN, "-p", prompt, "--model", "sonnet", "--allowedTools", "Read"],
-        capture_output=True, text=True, timeout=240,
+        capture_output=True, text=True, timeout=min(240, timeout),
     )
     if r.returncode != 0:
         raise RuntimeError(f"ocr claude call failed: {(r.stderr or '')[-200:]}")
@@ -508,18 +532,19 @@ def ocr_screen_text(url: str, duration_s: float = 0) -> tuple:
         return ocr_images(frames), False
 
 
-def _transcribe_response(audio: bytes) -> dict:
+def _transcribe_response(audio: bytes, deadline: float | None = None) -> dict:
     req = urllib.request.Request(
         WHISPER_URL, data=audio, headers={"Content-Type": "application/octet-stream"}
     )
-    with urllib.request.urlopen(req, timeout=300) as resp:
+    timeout = _deadline_timeout(deadline, 300)
+    with urllib.request.urlopen(req, timeout=min(300, timeout)) as resp:
         payload = json.loads(resp.read())
     return payload if isinstance(payload, dict) else {"transcript": str(payload)}
 
 
-def transcribe_structured(audio: bytes) -> dict:
+def transcribe_structured(audio: bytes, deadline: float | None = None) -> dict:
     """Return Whisper's transcript and timestamped segment mappings."""
-    payload = _transcribe_response(audio)
+    payload = _transcribe_response(audio, deadline)
     segments = payload.get("segments")
     return {
         "transcript": str(payload.get("transcript", "")),
@@ -607,35 +632,28 @@ def reply(text):
 class _EvidenceOCR:
     """Use the existing local vision OCR adapter for a fallback cover frame."""
 
-    def __init__(self) -> None:
-        self._results = {}
-
-    def read(self, path: str) -> dict:
-        text = ocr_images([path])
-        self._results[path] = text
-        return {"text": text}
-
-
-class _EvidenceVision:
-    """Vision provider backed by the same local Claude image reader."""
-
-    def __init__(self, ocr: _EvidenceOCR) -> None:
-        self._ocr = ocr
-
-    def observe(self, path: str) -> list[dict]:
-        # OCR already read this frame. Reuse its result instead of making a
-        # second model call, while exposing it through the shared vision seam.
-        return [{"text": self._ocr._results.get(path) or ocr_images([path])}]
+    def read(self, path: str, deadline: float | None = None) -> dict:
+        return {"text": ocr_images([path], deadline)}
 
 
 class _EvidenceFrameExtractor:
     """Extract bounded timestamped JPEGs from the already-downloaded video."""
 
-    def __init__(self, deadline_seconds: float = 600.0) -> None:
-        self.deadline_seconds = deadline_seconds
+    def event_times(self, video_path, duration_ms, deadline):
+        remaining = _deadline_timeout(deadline, 60)
+        result = subprocess.run(
+            [FFMPEG_BIN, "-hide_banner", "-i", video_path,
+             "-vf", "select=gt(scene\\,0.25),showinfo", "-an", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=min(60, remaining),
+        )
+        times = []
+        for line in result.stderr.splitlines():
+            match = re.search(r"pts_time:([0-9.]+)", line)
+            if match:
+                times.append(round(float(match.group(1)) * 1000))
+        return times, times
 
-    def extract_frames(self, video_path, candidates, directory):
-        deadline = time.monotonic() + self.deadline_seconds
+    def extract_frames(self, video_path, candidates, directory, deadline):
         paths = []
         for candidate in candidates:
             if time.monotonic() >= deadline:
@@ -644,10 +662,10 @@ class _EvidenceFrameExtractor:
             result = subprocess.run(
                 [FFMPEG_BIN, "-loglevel", "error", "-y", "-ss", str(candidate.timestamp_ms / 1000),
                  "-i", video_path, "-frames:v", "1", "-q:v", "4", path],
-                capture_output=True, timeout=30,
+                capture_output=True, timeout=_deadline_timeout(deadline, 30),
             )
             if result.returncode == 0 and os.path.isfile(path):
-                paths.append(path)
+                paths.append({"timestampMs": candidate.timestamp_ms, "path": path})
         return paths
 
 
@@ -670,7 +688,6 @@ def extract_capture_evidence(url: str):
         download_image=download_image_file,
         transcribe=transcribe_structured,
         ocr=ocr,
-        vision=_EvidenceVision(ocr),
         frame_extractor=_EvidenceFrameExtractor(),
     )
     return bundle

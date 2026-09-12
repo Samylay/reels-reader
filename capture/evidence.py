@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import time
 from typing import Any, Callable, Mapping
 
 
@@ -32,10 +33,17 @@ def _package() -> tuple[Any, Any]:
     root = os.path.abspath(EXTRACTION_ROOT)
     if not os.path.isdir(os.path.join(root, "extraction")):
         raise RuntimeError(f"triage extraction package not found: {root}")
-    if root not in sys.path:
-        sys.path.insert(0, root)
-    package = importlib.import_module("extraction")
-    instagram = importlib.import_module("extraction.instagram")
+    # The shared package is a configured dependency, not a reason to mutate
+    # the capture process import path permanently. This matters when study.py
+    # loads server.py by filename from cron.
+    original_path = list(sys.path)
+    try:
+        if root not in sys.path:
+            sys.path.insert(0, root)
+        package = importlib.import_module("extraction")
+        instagram = importlib.import_module("extraction.instagram")
+    finally:
+        sys.path[:] = original_path
     return package, instagram
 
 
@@ -63,19 +71,44 @@ class _Downloader:
         self._video_urls: dict[str, str] = {}
         self._embed_bodies: dict[str, str] = {}
 
-    def metadata(self, url: str) -> Mapping[str, Any]:
+    def metadata(self, url: str, deadline: float | None = None) -> Mapping[str, Any]:
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("extraction deadline exceeded")
         try:
-            value = dict(self._metadata(url))
+            try:
+                value = dict(self._metadata(url, deadline))
+            except TypeError:
+                value = dict(self._metadata(url))
         except Exception:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("extraction deadline exceeded")
             if not self._embed_page:
                 raise
-            body = self._embed_page(url)
+            try:
+                body = self._embed_page(url, deadline)
+            except TypeError:
+                body = self._embed_page(url)
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("extraction deadline exceeded")
             self._embed_bodies[url] = body
             caption = self._embed_caption(body) if self._embed_caption else ""
             alts = self._embed_alts(body) if self._embed_alts else []
             if not caption and not alts:
                 raise
             value = {"title": "", "description": caption}
+
+        entries = value.get("entries")
+        if isinstance(entries, list):
+            normalized_entries = []
+            for entry in entries:
+                if not isinstance(entry, Mapping):
+                    continue
+                child = dict(entry)
+                child.setdefault("url", child.get("webpage_url") or child.get("video_url") or child.get("thumbnail") or "")
+                if not child.get("type") and (child.get("duration") or child.get("video_url") or child.get("formats")):
+                    child["type"] = "video"
+                normalized_entries.append(child)
+            value["entries"] = normalized_entries
 
         # yt-dlp metadata uses duration as the stable video signal. The
         # shared adapter accepts either type/media_type or a video URL.
@@ -89,9 +122,16 @@ class _Downloader:
         # preserves their provenance instead of keeping them bridge-only.
         if not value.get("duration") and self._embed_page:
             try:
-                body = self._embed_bodies.pop(url, None) or self._embed_page(url)
+                body = self._embed_bodies.pop(url, None)
+                if body is None:
+                    try:
+                        body = self._embed_page(url, deadline)
+                    except TypeError:
+                        body = self._embed_page(url)
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise TimeoutError("extraction deadline exceeded")
                 alts = self._embed_alts(body) if self._embed_alts else []
-                if alts and not any(value.get(key) for key in ("children", "carousel", "media", "items")):
+                if alts and not any(value.get(key) for key in ("children", "carousel", "media", "items", "entries")):
                     value["children"] = [
                         {"id": f"embed-slide-{index}", "type": "image", "url": url, "alt_text": alt}
                         for index, alt in enumerate(alts, start=1)
@@ -100,32 +140,44 @@ class _Downloader:
                 pass
         return value
 
-    def download_video(self, url: str, path: str) -> str | bytes:
+    def download_video(self, url: str, path: str, deadline: float | None = None) -> str | bytes:
         if not self._download_video:
             raise RuntimeError("video download adapter is not configured")
         self._video_urls[path] = url
-        return self._download_video(url, path)
+        try:
+            return self._download_video(url, path, deadline)
+        except TypeError:
+            return self._download_video(url, path)
 
-    def extract_audio(self, video_path: str, path: str) -> str | bytes:
+    def extract_audio(self, video_path: str, path: str, deadline: float | None = None) -> str | bytes:
         if not self._extract_audio:
             raise RuntimeError("audio extraction adapter is not configured")
-        return self._extract_audio(video_path, path)
+        try:
+            return self._extract_audio(video_path, path, deadline)
+        except TypeError:
+            return self._extract_audio(video_path, path)
 
-    def download_image(self, url: str, path: str) -> str | bytes:
+    def download_image(self, url: str, path: str, deadline: float | None = None) -> str | bytes:
         if not self._download_image:
             raise RuntimeError("image download adapter is not configured")
-        return self._download_image(url, path)
+        try:
+            return self._download_image(url, path, deadline)
+        except TypeError:
+            return self._download_image(url, path)
 
 
 class _Transcriber:
     def __init__(self, transcribe: Callable[[bytes], Any]) -> None:
         self._transcribe = transcribe
 
-    def transcribe(self, audio: Any) -> Any:
+    def transcribe(self, audio: Any, deadline: float | None = None) -> Any:
         if isinstance(audio, str):
             with open(audio, "rb") as stream:
                 audio = stream.read()
-        return self._transcribe(audio)
+        try:
+            return self._transcribe(audio, deadline)
+        except TypeError:
+            return self._transcribe(audio)
 
 
 def extract_evidence(
