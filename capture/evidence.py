@@ -364,7 +364,9 @@ def add_ocr(bundle: Any, text: str, *, cover_only: bool = False) -> Any:
     coverage = package.Coverage(source_id, "ocr", "partial" if cover_only else "complete", reason_code="cover_only" if cover_only else None)
     issues = tuple(dict.fromkeys((*bundle.issues, "cover_only" if cover_only else "")))
     issues = tuple(item for item in issues if item)
-    segments = (*bundle.segments, frame, ocr)
+    # Frame identity is provenance on the non-empty OCR segment. A synthetic
+    # empty ``frame`` segment would violate the shared segment contract.
+    segments = (*bundle.segments, ocr)
     content_hash = hashlib.sha256("\n".join(segment.text for segment in segments if segment.text).encode("utf-8")).hexdigest()
     bundle_id = f"bundle_{hashlib.sha256((bundle.canonical_url + '\0' + content_hash).encode('utf-8')).hexdigest()[:24]}"
     return package.EvidenceBundle(
