@@ -43,6 +43,7 @@ import queue
 import re
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -50,14 +51,26 @@ import urllib.parse
 import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-import evidence as evidence_store
-from evidence import (
-    add_ocr,
-    extract_evidence as extract_shared_evidence,
-    legacy_content,
-    load_evidence,
-    save_evidence,
-)
+try:
+    import evidence as evidence_store
+except ModuleNotFoundError:
+    # ``study.py`` loads this file by path from cron, where capture/ is not on
+    # sys.path. Load the sibling directly without leaking that directory into
+    # the process import path.
+    import importlib.util
+    _evidence_spec = importlib.util.spec_from_file_location(
+        "reels_capture_evidence", os.path.join(os.path.dirname(os.path.abspath(__file__)), "evidence.py")
+    )
+    if _evidence_spec is None or _evidence_spec.loader is None:
+        raise ImportError("capture evidence bridge is unavailable")
+    evidence_store = importlib.util.module_from_spec(_evidence_spec)
+    sys.modules[_evidence_spec.name] = evidence_store
+    _evidence_spec.loader.exec_module(evidence_store)
+add_ocr = evidence_store.add_ocr
+extract_shared_evidence = evidence_store.extract_evidence
+legacy_content = evidence_store.legacy_content
+load_evidence = evidence_store.load_evidence
+save_evidence = evidence_store.save_evidence
 
 HOME = "/home/quorky"
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -85,6 +98,7 @@ def _ytdlp_cookie_args() -> list:
     return []
 DB_PATH = os.environ.get("CAPTURE_DB", os.path.join(BASE, "data", "capture.db"))
 MAX_AUDIO_BYTES = 24 * 1024 * 1024
+MAX_VIDEO_BYTES = 64 * 1024 * 1024
 # T06: bounded automatic retry of failed captures. A cookie-walled post that
 # keeps failing exhausts its attempts and stays honestly failed (or `partial`
 # if some text was salvaged).
@@ -293,11 +307,13 @@ def ytdlp_video_file(url: str, path: str) -> str:
     """Download one bounded temporary video for shared evidence extraction."""
     result = subprocess.run(
         [YTDLP_BIN, "-f", "best[height<=1080]/best", "--no-playlist",
-         "--no-warnings", *_ytdlp_cookie_args(), "-o", path, url],
+         "--no-warnings", "--max-filesize", "64M", *_ytdlp_cookie_args(), "-o", path, url],
         capture_output=True, text=True, timeout=300,
     )
     if result.returncode != 0 or not os.path.isfile(path):
         raise RuntimeError("video download failed")
+    if os.path.getsize(path) > MAX_VIDEO_BYTES:
+        raise RuntimeError("video limit exceeded")
     return path
 
 
@@ -492,12 +508,28 @@ def ocr_screen_text(url: str, duration_s: float = 0) -> tuple:
         return ocr_images(frames), False
 
 
-def transcribe(audio: bytes) -> str:
+def _transcribe_response(audio: bytes) -> dict:
     req = urllib.request.Request(
         WHISPER_URL, data=audio, headers={"Content-Type": "application/octet-stream"}
     )
     with urllib.request.urlopen(req, timeout=300) as resp:
-        return json.loads(resp.read()).get("transcript", "")
+        payload = json.loads(resp.read())
+    return payload if isinstance(payload, dict) else {"transcript": str(payload)}
+
+
+def transcribe_structured(audio: bytes) -> dict:
+    """Return Whisper's transcript and timestamped segment mappings."""
+    payload = _transcribe_response(audio)
+    segments = payload.get("segments")
+    return {
+        "transcript": str(payload.get("transcript", "")),
+        "segments": segments if isinstance(segments, list) else [],
+    }
+
+
+def transcribe(audio: bytes) -> str:
+    """Legacy string adapter retained for voice notes and old callers."""
+    return transcribe_structured(audio).get("transcript", "")
 
 
 def summarize(meta: dict, transcript: str, alt_texts: list = None,
@@ -575,8 +607,48 @@ def reply(text):
 class _EvidenceOCR:
     """Use the existing local vision OCR adapter for a fallback cover frame."""
 
+    def __init__(self) -> None:
+        self._results = {}
+
     def read(self, path: str) -> dict:
-        return {"text": ocr_images([path])}
+        text = ocr_images([path])
+        self._results[path] = text
+        return {"text": text}
+
+
+class _EvidenceVision:
+    """Vision provider backed by the same local Claude image reader."""
+
+    def __init__(self, ocr: _EvidenceOCR) -> None:
+        self._ocr = ocr
+
+    def observe(self, path: str) -> list[dict]:
+        # OCR already read this frame. Reuse its result instead of making a
+        # second model call, while exposing it through the shared vision seam.
+        return [{"text": self._ocr._results.get(path) or ocr_images([path])}]
+
+
+class _EvidenceFrameExtractor:
+    """Extract bounded timestamped JPEGs from the already-downloaded video."""
+
+    def __init__(self, deadline_seconds: float = 600.0) -> None:
+        self.deadline_seconds = deadline_seconds
+
+    def extract_frames(self, video_path, candidates, directory):
+        deadline = time.monotonic() + self.deadline_seconds
+        paths = []
+        for candidate in candidates:
+            if time.monotonic() >= deadline:
+                break
+            path = os.path.join(directory, f"frame-{candidate.timestamp_ms}.jpg")
+            result = subprocess.run(
+                [FFMPEG_BIN, "-loglevel", "error", "-y", "-ss", str(candidate.timestamp_ms / 1000),
+                 "-i", video_path, "-frames:v", "1", "-q:v", "4", path],
+                capture_output=True, timeout=30,
+            )
+            if result.returncode == 0 and os.path.isfile(path):
+                paths.append(path)
+        return paths
 
 
 def extract_capture_evidence(url: str):
@@ -586,6 +658,7 @@ def extract_capture_evidence(url: str):
     for callers that need its dictionary shape. The worker uses this function,
     so evidence is the source of truth for new captures and retries.
     """
+    ocr = _EvidenceOCR()
     bundle = extract_shared_evidence(
         normalize(url),
         metadata=ytdlp_json,
@@ -595,24 +668,11 @@ def extract_capture_evidence(url: str):
         download_video=ytdlp_video_file,
         extract_audio=extract_audio_file,
         download_image=download_image_file,
-        transcribe=transcribe,
-        ocr=_EvidenceOCR(),
+        transcribe=transcribe_structured,
+        ocr=ocr,
+        vision=_EvidenceVision(ocr),
+        frame_extractor=_EvidenceFrameExtractor(),
     )
-    fetched = legacy_content(bundle)
-    # Preserve the existing listicle/thin-content OCR policy. The shared
-    # extractor stores this result as a segment before the bundle is cached.
-    caption = (fetched["meta"].get("description") or fetched["meta"].get("title") or "").strip()
-    alt_text = " ".join(readable_alt_texts(fetched.get("alt_texts") or []))
-    substance = re.sub(r"#\w+", "", f"{caption} {fetched.get('transcript') or ''} {alt_text}").strip()
-    is_listicle = bool(LISTICLE_RE.search(caption))
-    if len(substance) < 80 or is_listicle:
-        try:
-            ocr_text, ocr_cover_only = ocr_screen_text(url, fetched["meta"].get("duration") or 0)
-        except Exception as error:
-            log.info("ocr failed for %s: %s", url, error)
-            ocr_text, ocr_cover_only = "", False
-        if ocr_text:
-            bundle = add_ocr(bundle, ocr_text, cover_only=ocr_cover_only)
     return bundle
 
 

@@ -4,6 +4,7 @@
 import json
 import hashlib
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -55,14 +56,14 @@ class EvidenceCaptureTests(unittest.TestCase):
                  patch.object(server, "EVIDENCE_DIR", evidence_dir), \
                  patch.object(server, "extract_capture_evidence", side_effect=extract), \
                  patch.object(server, "summarize", side_effect=summarize), \
-                 patch.object(server, "vault_append", return_value="vault.md"), \
+                patch.object(server, "vault_append", return_value="vault.md"), \
                  patch.object(server, "reply"):
                 server.process(url)
                 self.assertEqual(server.ledger_get(url)["status"], "failed")
                 server.process(url)
+                self.assertEqual(server.ledger_get(url)["status"], "done")
 
             self.assertEqual(extraction_calls, [url])
-            self.assertEqual(server.ledger_get(url), {})
             self.assertTrue(os.path.isfile(evidence_path(url)))
 
     def test_corrupt_cache_is_replaced_by_a_fresh_bundle(self):
@@ -86,6 +87,19 @@ class EvidenceCaptureTests(unittest.TestCase):
                     server.process(url)
                 with open(path, encoding="utf-8") as stream:
                     self.assertEqual(json.load(stream)["bundleId"], bundle.bundle_id)
+
+    def test_importlib_by_path_loads_sibling_without_path_leak(self):
+        code = """
+import importlib.util, os, sys
+path = '/home/quorky/apps/reels-reader/capture/server.py'
+spec = importlib.util.spec_from_file_location('reels_capture_cron_check', path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+assert module.evidence_store is not None
+assert os.path.dirname(path) not in sys.path
+"""
+        result = subprocess.run([sys.executable, "-c", code], cwd="/tmp", capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == "__main__":
